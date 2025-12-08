@@ -8,14 +8,14 @@
 import SwiftUI
 
 struct ContentView: View {
+    @AppStorage("folderPath") private var folderPath: String?
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        switch folderPath {
+        case .none:
+            InitView(folderPath: $folderPath)
+        case .some(let value):
+            BrainView(selectedFolderPath: value)
         }
-        .padding()
     }
 }
 
