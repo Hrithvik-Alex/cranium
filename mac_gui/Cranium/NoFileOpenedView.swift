@@ -6,11 +6,14 @@
 //
 
 import SwiftUI
+import Foundation
 
 struct NoFileOpenedView : View {
     @State private var showingFileCreationSheet = false
     @State private var navigateToFile = false
-    @Environment(FileManager.self) var fileManager
+    var fileDirectory: String
+    @Environment(VaultManager.self) var vaultManager
+    
     
     var body: some View {
             VStack {
@@ -27,7 +30,9 @@ struct NoFileOpenedView : View {
                         NewFileCreationView(isPresented: $showingFileCreationSheet) { fileName in
                             navigateToFile = true
                             showingFileCreationSheet = false
-                            fileManager.currentFile = fileName
+                            vaultManager.currentFile = fileName
+                            //TODO: replace with zig?
+                            FileManager.default.createFile(atPath: "\(fileDirectory)/\(fileName)", contents: Data())
                         }
                     }
                     

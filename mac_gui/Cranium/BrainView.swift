@@ -10,7 +10,7 @@ import Observation
 
 struct BrainView: View {
     var selectedFolderPath: String
-    @State private var fileManager: FileManager = FileManager()
+    @State private var vaultManager: VaultManager = VaultManager()
     
     var body: some View {
         Text("HI")
@@ -18,15 +18,15 @@ struct BrainView: View {
             if let file = fileManager.currentFile {
                 FileView(fileName: file)
             } else {
-                NoFileOpenedView()
+                NoFileOpenedView(fileDirectory: selectedFolderPath)
             }
         }
-        .environment(fileManager)
+        .environment(vaultManager)
     }
 }
 
 @Observable
-class FileManager {
+class VaultManager {
     class Storage {
         @AppStorage("currentFile")  public var currentFile: String?
     }
