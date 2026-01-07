@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/zigtools/zls/master/schema.json",
+  "enable_snippets": true,
+  "enable_ast_check_diagnostics": true,
+  "enable_autofix": true,
+  "enable_import_embedfile_argument_completions": true,
+  "enable_build_on_save": true,
+  "warn_style": true,
+  "highlight_global_var_declarations": true,
+  "dangerous_comptime_experiments_do_not_enable": false,
+  "skip_std_references": false,
+  "semantic_tokens": "full"
+}
