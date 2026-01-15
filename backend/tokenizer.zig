@@ -19,28 +19,55 @@ const BlockType = union(enum) {
     Paragraph: void,
     Heading: u4,
     CodeBlock: void,
-    BlockQuote: void,
+    BlockQuote: usize,
     OrderedList: usize,
     OrderedListItem: usize,
     UnorderedList: usize,
     UnorderedListItem: usize,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print("{s}", .{@tagName(self)});
+        switch (self) {
+            .Heading => |level| try writer.print(" - l{x}", .{level}),
+            .OrderedList, .OrderedListItem, .UnorderedList, .UnorderedListItem => |depth| try writer.print(" - depth {x}", .{depth}),
+            else => {},
+        }
+    }
 };
 
-fn getFirstWord(block_stack: *std.ArrayList(*Block), line: []const u8) struct { []const u8, usize } {
+fn getFirstWord(block_stack: *std.ArrayList(*Block), line: []const u8) struct { []const u8, usize, usize } {
     var words = std.mem.tokenizeAny(u8, line, " ");
 
     var block_quote_depth: u16 = 0;
+    var depth: usize = 0;
 
-    var first_word = words.next().?;
+    var first_word = words.next() orelse return .{ "", depth, block_quote_depth };
+    depth = @intFromPtr(first_word.ptr) - @intFromPtr(line.ptr);
 
     for (block_stack.items) |b| {
-        if (b.blockType == BlockType.BlockQuote) {
-            block_quote_depth += 1;
-            first_word = words.next().?;
+        switch (b.blockType) {
+            .BlockQuote => {
+                if (std.mem.eql(u8, first_word, ">")) {
+                    block_quote_depth += 1;
+                    if (words.peek() != null) {
+                        first_word = words.next().?;
+                        depth = @intFromPtr(first_word.ptr) - @intFromPtr(line.ptr);
+                    } else {
+                        first_word = "";
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            },
+            else => {},
         }
     }
 
-    return .{ first_word, @intFromPtr(first_word.ptr) - @intFromPtr(line.ptr) };
+    return .{ first_word, depth, block_quote_depth };
 }
 
 fn isOrderedNumber(word: []const u8) bool {
@@ -64,25 +91,25 @@ const Block = struct {
         //     }
         // }
         //if (line.len == 0 and self.blockType != BlockType.Document) return false;
-        const first_word, const first_word_depth = getFirstWord(block_stack, line);
+        const first_word, const first_word_depth, const block_quote_depth = getFirstWord(block_stack, line);
         //if (line.len == 0 and self.blockType != BlockType.Document) return false;
         return switch (self.blockType) {
             .Document => true,
-            .BlockQuote => std.mem.eql(u8, first_word, ">"),
+            .BlockQuote => |depth| depth <= block_quote_depth,
             .Paragraph => false,
             .Heading => false,
             .CodeBlock => !std.mem.eql(u8, line, "```"),
-            .UnorderedList => |depth| depth <= first_word_depth and (first_word.len == 1) and (first_word[0] == '-'),
-            .OrderedListItem => |depth| depth < first_word_depth, // TODO: fix, needs to account for depth below? maybe this is enough?
+            .UnorderedList => |depth| depth < first_word_depth or (depth == first_word_depth and std.mem.eql(u8, first_word, "-")),
+            .OrderedListItem => |depth| depth < first_word_depth,
             .OrderedList => |depth| {
                 return depth <= first_word_depth and isOrderedNumber(first_word);
             },
-            BlockType.UnorderedListItem => |depth| depth < first_word_depth, // TODO: same as OLT fix
+            BlockType.UnorderedListItem => |depth| depth < first_word_depth,
         };
     }
 };
 
-fn determineBlockType(block_stack: *std.ArrayList(*Block), line: []const u8) BlockType {
+fn determineBlockType(block_stack: *std.ArrayList(*Block), line: []const u8) ?BlockType {
     // const words = std.mem.tokenizeAny(u8, line, " ").next();
     //
     // var block_quote_depth = 0;
@@ -94,11 +121,14 @@ fn determineBlockType(block_stack: *std.ArrayList(*Block), line: []const u8) Blo
     // }
     //
     // const first_word = words[block_quote_depth];
+    const first_word, const first_word_depth, const block_quote_depth = getFirstWord(block_stack, line);
 
-    const first_word, const first_word_depth = getFirstWord(block_stack, line);
+    if (first_word.len == 0) {
+        return null;
+    }
 
     if (std.mem.eql(u8, first_word, ">")) {
-        return BlockType.BlockQuote;
+        return BlockType{ .BlockQuote = block_quote_depth + 1 };
     } else if (std.mem.eql(u8, first_word, "```")) {
         return BlockType.CodeBlock;
     }
@@ -144,7 +174,7 @@ pub fn parseBlocks(allocator: Allocator, text: []const u8) !*Block {
     var lines = std.mem.tokenizeAny(u8, text, "\n");
 
     const document_block = try allocator.create(Block);
-    document_block.* = (Block{ .blockType = .Document, .children = std.ArrayList(*Block).empty, .content = "" });
+    document_block.* = (Block{ .blockType = .Document, .children = std.ArrayList(*Block).empty, .content = null });
 
     var block_stack = std.ArrayList(*Block).empty;
     try block_stack.append(allocator, document_block);
@@ -152,14 +182,12 @@ pub fn parseBlocks(allocator: Allocator, text: []const u8) !*Block {
     while (lines.next()) |line| {
         var i: usize = 0;
 
-        std.debug.print("what that line do: {s}\n", .{line});
         // reset the stack
         for (block_stack.items) |b| {
-            i += 1;
-
             if (!b.can_continue(&block_stack, line)) {
                 break;
             }
+            i += 1;
         }
 
         while (i < block_stack.items.len) {
@@ -168,10 +196,11 @@ pub fn parseBlocks(allocator: Allocator, text: []const u8) !*Block {
 
         var current_block = block_stack.items[i - 1];
 
-        const block_type = determineBlockType(&block_stack, line);
+        const block_type = determineBlockType(&block_stack, line) orelse continue;
+        std.debug.print("what that line do: \"{s}\", block_type: {f}\n", .{ line, block_type });
 
         const next_top_block = try allocator.create(Block);
-        next_top_block.* = Block{ .blockType = block_type, .children = std.ArrayList(*Block).empty, .content = "" };
+        next_top_block.* = Block{ .blockType = block_type, .children = std.ArrayList(*Block).empty, .content = null };
         try current_block.children.append(allocator, next_top_block);
         try block_stack.append(allocator, next_top_block);
 
@@ -187,9 +216,9 @@ pub fn parseBlocks(allocator: Allocator, text: []const u8) !*Block {
                 }
 
                 const li = try allocator.create(Block);
-                li.* = Block{ .blockType = @unionInit(BlockType, item_tag_name, depth), .children = std.ArrayList(*Block).empty, .content = "" };
+                li.* = Block{ .blockType = @unionInit(BlockType, item_tag_name, depth), .children = std.ArrayList(*Block).empty, .content = null };
                 const para = try allocator.create(Block);
-                para.* = Block{ .blockType = .Paragraph, .children = std.ArrayList(*Block).empty, .content = "" };
+                para.* = Block{ .blockType = .Paragraph, .children = std.ArrayList(*Block).empty, .content = null };
 
                 try next_top_block.children.append(allocator, li);
                 try li.children.append(allocator, para);
@@ -199,9 +228,20 @@ pub fn parseBlocks(allocator: Allocator, text: []const u8) !*Block {
 
                 para.content = line;
             },
+            .OrderedListItem, .UnorderedListItem => {
+                const para = try allocator.create(Block);
+                para.* = Block{ .blockType = .Paragraph, .children = std.ArrayList(*Block).empty, .content = null };
+
+                try next_top_block.children.append(allocator, para);
+
+                try block_stack.append(allocator, para);
+
+                para.content = line;
+            },
+            .BlockQuote => pass, // TODO: annoying depth handling unfortunately
             .Heading => next_top_block.content = line,
             .Paragraph => next_top_block.content = line,
-            else => {}, // CodeBlock, BlockQuote, Document, OrderedListItem, UnorderedListItem
+            else => {}, // CodeBlock, BlockQuote, Document,
         }
     }
 
@@ -249,11 +289,32 @@ pub fn parseBlocks(allocator: Allocator, text: []const u8) !*Block {
 //
 //
 
+fn printBlock(b: *Block, depth: usize) void {
+    for (0..depth) |_| {
+        std.debug.print("  ", .{});
+    }
+    std.debug.print("type: {f}, ", .{b.blockType});
+    if (b.content != null) {
+        std.debug.print("content: \"{s}\", ", .{b.content.?});
+    }
+    if (b.children.items.len > 0) {
+        std.debug.print("children: [\n", .{});
+        for (b.children.items) |child| {
+            printBlock(child, depth + 1);
+        }
+        for (0..depth) |_| {
+            std.debug.print("  ", .{});
+        }
+        std.debug.print("],", .{});
+    }
+    std.debug.print("\n", .{});
+}
+
 fn block(
     a: std.mem.Allocator,
     bt: BlockType,
     children: []const *Block,
-    content: []const u8,
+    content: ?[]const u8,
 ) !*Block {
     const b = try a.create(Block);
     b.* = .{
@@ -297,31 +358,33 @@ test "block parser" {
         try block(allocator, .{ .Heading = 2 }, &.{}, "## sample heading"),
         try block(allocator, .Paragraph, &.{}, "This is a sample paragraph. It is actually going to be"),
         try block(allocator, .Paragraph, &.{}, "split across two different lines."),
-        try block(allocator, .{ .UnorderedList = 2 }, &.{
-            try block(allocator, .{ .UnorderedListItem = 2 }, &.{
+        try block(allocator, .{ .UnorderedList = 1 }, &.{
+            try block(allocator, .{ .UnorderedListItem = 1 }, &.{
                 try block(allocator, .Paragraph, &.{}, " - this is the first element in a list. It shall also be"),
                 try block(allocator, .Paragraph, &.{}, "   split across two lines."),
-            }, ""),
-            try block(allocator, .{ .UnorderedListItem = 2 }, &.{
+            }, null),
+            try block(allocator, .{ .UnorderedListItem = 1 }, &.{
                 try block(allocator, .Paragraph, &.{}, " - this is the second element."),
-                try block(allocator, .{ .UnorderedList = 4 }, &.{
-                    try block(allocator, .{ .UnorderedListItem = 4 }, &.{
+                try block(allocator, .{ .UnorderedList = 3 }, &.{
+                    try block(allocator, .{ .UnorderedListItem = 3 }, &.{
                         try block(allocator, .Paragraph, &.{}, "   - this is a nested list "),
-                    }, ""),
-                    try block(allocator, .{ .UnorderedListItem = 4 }, &.{
+                    }, null),
+                    try block(allocator, .{ .UnorderedListItem = 3 }, &.{
                         try block(allocator, .Paragraph, &.{}, "   - anything else here? "),
-                    }, ""),
-                }, ""),
-            }, ""),
-        }, ""),
-        try block(allocator, .BlockQuote, &.{ try block(allocator, .Paragraph, &.{}, "> block quote time."), try block(allocator, .CodeBlock, &.{
+                    }, null),
+                }, null),
+            }, null),
+        }, null),
+        try block(allocator, .{ .BlockQuote = 1 }, &.{ try block(allocator, .Paragraph, &.{}, "> block quote time."), try block(allocator, .CodeBlock, &.{
             try block(allocator, .Paragraph, &.{}, "> fn this_is_code {"),
             try block(allocator, .Paragraph, &.{}, "> }"),
-        }, ""), try block(allocator, .{ .OrderedList = 2 }, &.{ try block(allocator, .{ .OrderedListItem = 2 }, &.{try block(allocator, .Paragraph, &.{}, "> 1. there are ordered lists too.")}, ""), try block(allocator, .{ .OrderedListItem = 2 }, &.{try block(allocator, .Paragraph, &.{}, "> 2. is this surprising?")}, "") }, "") }, ""),
+        }, null), try block(allocator, .{ .OrderedList = 2 }, &.{ try block(allocator, .{ .OrderedListItem = 2 }, &.{try block(allocator, .Paragraph, &.{}, "> 1. there are ordered lists too.")}, null), try block(allocator, .{ .OrderedListItem = 2 }, &.{try block(allocator, .Paragraph, &.{}, "> 2. is this surprising?")}, null) }, null) }, null),
         try block(allocator, .Paragraph, &.{}, "okay we done block quoting now. bye!"),
-    }, "");
+    }, null);
 
     const markdown_blocks = try parseBlocks(allocator, markdown_text);
+
+    printBlock(markdown_blocks, 0);
 
     try std.testing.expectEqualDeep(markdown_blocks_expected, markdown_blocks);
 }
