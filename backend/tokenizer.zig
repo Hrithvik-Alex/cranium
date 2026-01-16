@@ -81,24 +81,13 @@ const Block = struct {
     content: ?[]const u8,
 
     fn can_continue(self: *Block, block_stack: *std.ArrayList(*Block), line: []const u8) bool {
-        // const words = std.mem.tokenizeAny(u8, line, " ").next();
-        //
-        // var block_quote_depth = 0;
-        //
-        // for (block_stack) |block| {
-        //     if (block.blockType == BlockType.BlockQuote) {
-        //         block_quote_depth += 1;
-        //     }
-        // }
-        //if (line.len == 0 and self.blockType != BlockType.Document) return false;
         const first_word, const first_word_depth, const block_quote_depth = getFirstWord(block_stack, line);
-        //if (line.len == 0 and self.blockType != BlockType.Document) return false;
         return switch (self.blockType) {
             .Document => true,
             .BlockQuote => |depth| depth <= block_quote_depth,
             .Paragraph => false,
             .Heading => false,
-            .CodeBlock => !std.mem.eql(u8, line, "```"),
+            .CodeBlock => true, // handled in handleBlockType
             .UnorderedList => |depth| depth < first_word_depth or (depth == first_word_depth and std.mem.eql(u8, first_word, "-")),
             .OrderedListItem => |depth| depth < first_word_depth,
             .OrderedList => |depth| {
@@ -110,17 +99,6 @@ const Block = struct {
 };
 
 fn determineBlockType(block_stack: *std.ArrayList(*Block), line: []const u8) ?BlockType {
-    // const words = std.mem.tokenizeAny(u8, line, " ").next();
-    //
-    // var block_quote_depth = 0;
-    //
-    // for (block_stack) |block| {
-    //     if (block.blockType == BlockType.BlockQuote) {
-    //         block_quote_depth += 1;
-    //     }
-    // }
-    //
-    // const first_word = words[block_quote_depth];
     const first_word, const first_word_depth, const block_quote_depth = getFirstWord(block_stack, line);
 
     if (first_word.len == 0) {
@@ -147,7 +125,6 @@ fn determineBlockType(block_stack: *std.ArrayList(*Block), line: []const u8) ?Bl
         } else {
             std.debug.panic("first_word_depth < prev_depth", .{});
         }
-        // if cur_depth_start
     }
 
     if (isOrderedNumber(first_word)) {
@@ -168,6 +145,51 @@ fn determineBlockType(block_stack: *std.ArrayList(*Block), line: []const u8) ?Bl
         }
     }
     return if (is_header) BlockType{ .Heading = @intCast(first_word.len) } else BlockType.Paragraph;
+}
+
+pub fn addToStack(allocator: Allocator, block_stack: *std.ArrayList(*Block), block_type: BlockType) !*Block {
+    var current_block = block_stack.items[block_stack.items.len - 1];
+
+    const next_top_block = try allocator.create(Block);
+    next_top_block.* = Block{ .blockType = block_type, .children = std.ArrayList(*Block).empty, .content = null };
+    try current_block.children.append(allocator, next_top_block);
+    try block_stack.append(allocator, next_top_block);
+    return next_top_block;
+}
+
+pub fn handleBlockType(allocator: Allocator, block_stack: *std.ArrayList(*Block), block_type: BlockType, line: []const u8) !void {
+    const next_top_block = try addToStack(allocator, block_stack, block_type);
+    switch (block_type) {
+        inline .OrderedList, .UnorderedList => |depth, tag| {
+            const tag_name = @tagName(tag);
+            const item_tag_name = tag_name ++ "Item";
+
+            comptime {
+                if (!@hasField(BlockType, item_tag_name)) {
+                    @compileError("Missing BlockType variant: " ++ item_tag_name);
+                }
+            }
+
+            try handleBlockType(allocator, block_stack, @unionInit(BlockType, item_tag_name, depth), line);
+        },
+        .OrderedListItem, .UnorderedListItem => {
+            try handleBlockType(allocator, block_stack, .Paragraph, line);
+        },
+        .BlockQuote => {
+            const current_block_type = determineBlockType(block_stack, line) orelse return;
+            try handleBlockType(allocator, block_stack, current_block_type, line);
+        },
+        .Heading => next_top_block.content = line,
+        .Paragraph => next_top_block.content = line,
+        .CodeBlock => {
+            if (block_stack.items.len >= 2 and block_stack.items[block_stack.items.len - 2].blockType == .CodeBlock) {
+                _ = block_stack.pop();
+                const opening_code_block = block_stack.pop() orelse unreachable;
+                _ = opening_code_block.children.pop();
+            }
+        },
+        .Document => {},
+    }
 }
 
 pub fn parseBlocks(allocator: Allocator, text: []const u8) !*Block {
@@ -194,100 +216,13 @@ pub fn parseBlocks(allocator: Allocator, text: []const u8) !*Block {
             _ = block_stack.pop();
         }
 
-        var current_block = block_stack.items[i - 1];
-
         const block_type = determineBlockType(&block_stack, line) orelse continue;
         std.debug.print("what that line do: \"{s}\", block_type: {f}\n", .{ line, block_type });
-
-        const next_top_block = try allocator.create(Block);
-        next_top_block.* = Block{ .blockType = block_type, .children = std.ArrayList(*Block).empty, .content = null };
-        try current_block.children.append(allocator, next_top_block);
-        try block_stack.append(allocator, next_top_block);
-
-        switch (block_type) {
-            inline .OrderedList, .UnorderedList => |depth, tag| {
-                const tag_name = @tagName(tag);
-                const item_tag_name = tag_name ++ "Item";
-
-                comptime {
-                    if (!@hasField(BlockType, item_tag_name)) {
-                        @compileError("Missing BlockType variant: " ++ item_tag_name);
-                    }
-                }
-
-                const li = try allocator.create(Block);
-                li.* = Block{ .blockType = @unionInit(BlockType, item_tag_name, depth), .children = std.ArrayList(*Block).empty, .content = null };
-                const para = try allocator.create(Block);
-                para.* = Block{ .blockType = .Paragraph, .children = std.ArrayList(*Block).empty, .content = null };
-
-                try next_top_block.children.append(allocator, li);
-                try li.children.append(allocator, para);
-
-                try block_stack.append(allocator, li);
-                try block_stack.append(allocator, para);
-
-                para.content = line;
-            },
-            .OrderedListItem, .UnorderedListItem => {
-                const para = try allocator.create(Block);
-                para.* = Block{ .blockType = .Paragraph, .children = std.ArrayList(*Block).empty, .content = null };
-
-                try next_top_block.children.append(allocator, para);
-
-                try block_stack.append(allocator, para);
-
-                para.content = line;
-            },
-            .BlockQuote => pass, // TODO: annoying depth handling unfortunately
-            .Heading => next_top_block.content = line,
-            .Paragraph => next_top_block.content = line,
-            else => {}, // CodeBlock, BlockQuote, Document,
-        }
+        try handleBlockType(allocator, &block_stack, block_type, line);
     }
 
     return document_block;
 }
-//
-// pub fn tokenize(allocator: Allocator, text: []const u8) !std.ArrayList(RawToken) {
-//     var tokens = std.ArrayList(RawToken).empty;
-//
-//     const n = text.len;
-//     var i: usize = 0;
-//
-//     while (i < n) {
-//         if (text[i] == '*') {
-//             try tokens.append(allocator, RawToken.star);
-//             i += 1;
-//         } else if (text[i] == '_') {
-//             try tokens.append(allocator, RawToken.underscore);
-//             i += 1;
-//         } else if (text[i] == '\n') {
-//             try tokens.append(allocator, RawToken.newline);
-//             i += 1;
-//         } else {
-//             var ni = i + 1;
-//
-//             while (ni < n) {
-//                 switch (text[ni]) {
-//                     '*', '_', '\n' => break,
-//                     else => ni += 1,
-//                 }
-//             }
-//
-//             try tokens.append(allocator, RawToken{ .text = text[i..ni] });
-//             i = ni;
-//         }
-//     }
-//
-//     return tokens;
-// }
-
-// pub fn parse() {
-//
-// }
-//
-//
-//
 
 fn printBlock(b: *Block, depth: usize) void {
     for (0..depth) |_| {
@@ -336,15 +271,15 @@ test "block parser" {
         \\ - this is the first element in a list. It shall also be
         \\   split across two lines.
         \\ - this is the second element.
-        \\   - this is a nested list 
-        \\   - anything else here? 
-        \\> block quote time. 
+        \\   - this is a nested list
+        \\   - anything else here?
+        \\> block quote time.
         \\> ```
         \\> fn this_is_code {
         \\> }
         \\> ```
         \\> 
-        \\> 1. there are ordered lists too. 
+        \\> 1. there are ordered lists too.
         \\> 2. is this surprising?
         \\ 
         \\okay we done block quoting now. bye!
@@ -367,10 +302,10 @@ test "block parser" {
                 try block(allocator, .Paragraph, &.{}, " - this is the second element."),
                 try block(allocator, .{ .UnorderedList = 3 }, &.{
                     try block(allocator, .{ .UnorderedListItem = 3 }, &.{
-                        try block(allocator, .Paragraph, &.{}, "   - this is a nested list "),
+                        try block(allocator, .Paragraph, &.{}, "   - this is a nested list"),
                     }, null),
                     try block(allocator, .{ .UnorderedListItem = 3 }, &.{
-                        try block(allocator, .Paragraph, &.{}, "   - anything else here? "),
+                        try block(allocator, .Paragraph, &.{}, "   - anything else here?"),
                     }, null),
                 }, null),
             }, null),
