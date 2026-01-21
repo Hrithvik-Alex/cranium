@@ -25,6 +25,55 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // ============================================
+    // Static library for Swift/Xcode consumption
+    // ============================================
+    // Build for macOS (both ARM and Intel)
+    const macos_aarch64_target = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .macos,
+    });
+
+    const macos_x86_64_target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .macos,
+    });
+
+    // ARM64 (Apple Silicon) static library
+    const lib_aarch64 = b.addLibrary(.{
+        .linkage = .static,
+        .name = "cranium",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("backend/md_file_interop.zig"),
+            .target = macos_aarch64_target,
+            .optimize = optimize,
+        }),
+    });
+
+    // x86_64 (Intel) static library
+    const lib_x86_64 = b.addLibrary(.{
+        .linkage = .static,
+        .name = "cranium_x86_64",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("backend/md_file_interop.zig"),
+            .target = macos_x86_64_target,
+            .optimize = optimize,
+        }),
+    });
+
+    // Install both libraries
+    const install_lib_aarch64 = b.addInstallArtifact(lib_aarch64, .{});
+    const install_lib_x86_64 = b.addInstallArtifact(lib_x86_64, .{});
+
+    // Install the C header
+    const install_header = b.addInstallHeaderFile(b.path("include/cranium.h"), "cranium.h");
+
+    // Create a "lib" step that builds the static library + header
+    const lib_step = b.step("lib", "Build static library for Swift/Xcode");
+    lib_step.dependOn(&install_lib_aarch64.step);
+    lib_step.dependOn(&install_lib_x86_64.step);
+    lib_step.dependOn(&install_header.step);
+
     // Run step
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);

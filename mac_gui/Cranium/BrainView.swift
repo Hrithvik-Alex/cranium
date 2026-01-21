@@ -15,8 +15,8 @@ struct BrainView: View {
     var body: some View {
         Text("HI")
         NavigationStack {
-            if let file = fileManager.currentFile {
-                FileView(fileName: file)
+            if let file = vaultManager.currentFile {
+                FileView(fileName: file, baseDirectory: selectedFolderPath)
             } else {
                 NoFileOpenedView(fileDirectory: selectedFolderPath)
             }
