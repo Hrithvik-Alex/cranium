@@ -163,15 +163,33 @@ struct BlockTreeView: View {
     let block: UnsafeMutablePointer<CBlock>
     let depth: Int
     
+    /// Block types that handle their own children rendering
+    var handlesOwnChildren: Bool {
+        switch block.blockType {
+        case BlockType_BlockQuote,
+             BlockType_OrderedList,
+             BlockType_UnorderedList,
+             BlockType_OrderedListItem,
+             BlockType_UnorderedListItem,
+             BlockType_CodeBlock,
+             BlockType_Paragraph,  // Paragraphs with inline children
+             BlockType_Heading:    // Headings with inline children
+            return true
+        default:
+            return false
+        }
+    }
+    
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             // Render this block's content based on type
             blockContent
             
-            // Render children
-            ForEach(0..<block.children.count, id: \.self) { index in
-                BlockTreeView(block: block.children[index], depth: depth + 1)
-                    .padding(.leading, 16)
+            // Only render children here if the block doesn't handle its own children
+            if !handlesOwnChildren {
+                ForEach(0..<block.children.count, id: \.self) { index in
+                    BlockTreeView(block: block.children[index], depth: depth + 1)
+                }
             }
         }
     }
@@ -183,36 +201,53 @@ struct BlockTreeView: View {
             EmptyView()
             
         case BlockType_Heading:
-            if let text = block.content {
-                // Strip the leading #'s from the heading
-                let cleanText = text.trimmingCharacters(in: .whitespaces)
-                    .drop(while: { $0 == "#" })
-                    .trimmingCharacters(in: .whitespaces)
+            // After inline parsing, heading content is in children (RawStr, Strong, etc.)
+            // We need to strip the ## marker from the first child
+            if !block.children.isEmpty {
+                InlineTextView(block: block, stripMarker: stripHeadingMarker)
+                    .font(headingFont(level: block.blockTypeValue))
+                    .fontWeight(.bold)
+            } else if let text = block.content {
+                // Fallback if no children
+                let cleanText = stripHeadingMarker(text)
                 Text(cleanText)
                     .font(headingFont(level: block.blockTypeValue))
                     .fontWeight(.bold)
             }
             
         case BlockType_Paragraph:
-            if let text = block.content {
-                Text(text)
+            // After inline parsing, paragraph content is in children
+            if !block.children.isEmpty {
+                // Render inline children, stripping list markers from first child
+                InlineTextView(block: block, stripMarker: stripListMarker)
+            } else if let text = block.content {
+                // Fallback if no children
+                Text(stripListMarker(text))
             }
             
         case BlockType_CodeBlock:
-            if let text = block.content {
-                Text(text)
-                    .font(.system(.body, design: .monospaced))
-                    .padding(8)
-                    .background(Color.gray.opacity(0.2))
-                    .cornerRadius(4)
+            // Code blocks have children that contain the actual code
+            VStack(alignment: .leading) {
+                ForEach(0..<block.children.count, id: \.self) { index in
+                    if let text = block.children[index].content {
+                        // Strip the > prefix from block quotes if present
+                        let cleanText = text.hasPrefix("> ") ? String(text.dropFirst(2)) : text
+                        Text(cleanText)
+                    }
+                }
             }
+            .font(.system(.body, design: .monospaced))
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.gray.opacity(0.2))
+            .cornerRadius(4)
             
         case BlockType_BlockQuote:
-            HStack {
+            HStack(alignment: .top) {
                 Rectangle()
-                    .fill(Color.gray)
+                    .fill(Color.blue.opacity(0.5))
                     .frame(width: 3)
-                VStack(alignment: .leading) {
+                VStack(alignment: .leading, spacing: 4) {
                     ForEach(0..<block.children.count, id: \.self) { index in
                         BlockTreeView(block: block.children[index], depth: depth + 1)
                     }
@@ -220,22 +255,43 @@ struct BlockTreeView: View {
             }
             .padding(.leading, 8)
             
-        case BlockType_OrderedList, BlockType_UnorderedList:
-            EmptyView() // Children will render the list items
+        case BlockType_OrderedList:
+            // Render children (list items) with numbers
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(0..<block.children.count, id: \.self) { index in
+                    BlockTreeView(block: block.children[index], depth: depth + 1)
+                }
+            }
+            
+        case BlockType_UnorderedList:
+            // Render children (list items) with bullets
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(0..<block.children.count, id: \.self) { index in
+                    BlockTreeView(block: block.children[index], depth: depth + 1)
+                }
+            }
             
         case BlockType_OrderedListItem:
-            HStack(alignment: .top) {
+            // List items contain children (usually paragraphs)
+            HStack(alignment: .top, spacing: 8) {
                 Text("•")
-                if let text = block.content {
-                    Text(text)
+                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(0..<block.children.count, id: \.self) { index in
+                        BlockTreeView(block: block.children[index], depth: depth + 1)
+                    }
                 }
             }
             
         case BlockType_UnorderedListItem:
-            HStack(alignment: .top) {
+            // List items contain children (usually paragraphs)
+            HStack(alignment: .top, spacing: 8) {
                 Text("•")
-                if let text = block.content {
-                    Text(text)
+                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(0..<block.children.count, id: \.self) { index in
+                        BlockTreeView(block: block.children[index], depth: depth + 1)
+                    }
                 }
             }
             
@@ -281,6 +337,47 @@ struct BlockTreeView: View {
         }
     }
     
+    /// Strip heading markers (## ) from the beginning of a heading line
+    func stripHeadingMarker(_ text: String) -> String {
+        var result = text.trimmingCharacters(in: .whitespaces)
+        // Remove leading # characters
+        while result.hasPrefix("#") {
+            result = String(result.dropFirst())
+        }
+        // Remove the space after the #s
+        return result.trimmingCharacters(in: .whitespaces)
+    }
+    
+    /// Strip list markers (- , * , 1. ) from the beginning of a list item line
+    func stripListMarker(_ text: String) -> String {
+        var result = text
+        // Remove leading whitespace
+        result = result.trimmingCharacters(in: .whitespaces)
+        
+        // Check for unordered list markers: -, *, +
+        if result.hasPrefix("- ") || result.hasPrefix("* ") || result.hasPrefix("+ ") {
+            return String(result.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        }
+        
+        // Check for ordered list markers: 1. 2. etc.
+        if let dotIndex = result.firstIndex(of: ".") {
+            let prefix = result[..<dotIndex]
+            if prefix.allSatisfy({ $0.isNumber }) {
+                let afterDot = result.index(after: dotIndex)
+                if afterDot < result.endIndex {
+                    return String(result[afterDot...]).trimmingCharacters(in: .whitespaces)
+                }
+            }
+        }
+        
+        // Check for block quote markers
+        if result.hasPrefix("> ") {
+            return String(result.dropFirst(2))
+        }
+        
+        return result
+    }
+    
     func headingFont(level: Int) -> Font {
         switch level {
         case 1: return .largeTitle
@@ -289,6 +386,52 @@ struct BlockTreeView: View {
         case 4: return .title3
         case 5: return .headline
         default: return .subheadline
+        }
+    }
+}
+
+/// Renders inline content (RawStr, Strong, Emphasis, etc.) as concatenated text
+struct InlineTextView: View {
+    let block: UnsafeMutablePointer<CBlock>
+    /// Optional function to strip markers from the first text element
+    var stripMarker: ((String) -> String)?
+    
+    var body: some View {
+        let children = block.children
+        if children.isEmpty {
+            Text("")
+        } else {
+            children.enumerated().reduce(Text("")) { result, item in
+                let (index, child) = item
+                // Apply marker stripping only to the first child
+                let shouldStrip = (index == 0 && stripMarker != nil)
+                return result + textForInlineBlock(child, stripFirst: shouldStrip)
+            }
+        }
+    }
+    
+    func textForInlineBlock(_ child: UnsafeMutablePointer<CBlock>, stripFirst: Bool) -> Text {
+        var content = child.content ?? ""
+        
+        // Strip marker from first RawStr if needed
+        if stripFirst && child.blockType == BlockType_RawStr, let strip = stripMarker {
+            content = strip(content)
+        }
+        
+        switch child.blockType {
+        case BlockType_RawStr:
+            return Text(content)
+        case BlockType_Strong:
+            return Text(content).bold()
+        case BlockType_Emphasis:
+            return Text(content).italic()
+        case BlockType_StrongEmph:
+            return Text(content).bold().italic()
+        case BlockType_Link:
+            // Links in Text need special handling - just show as underlined for now
+            return Text(content).underline().foregroundColor(.blue)
+        default:
+            return Text(content)
         }
     }
 }
