@@ -289,88 +289,266 @@ const DelimiterStackItem = struct {
     is_active: bool,
     is_opener: bool,
     is_closer: bool,
+    node: std.DoublyLinkedList.Node = .{},
+
+    fn fromNode(n: *std.DoublyLinkedList.Node) *DelimiterStackItem {
+        return @fieldParentPtr("node", n);
+    }
 };
 
-fn processEmphasis(allocator: Allocator, delimiter_stack: *std.DoublyLinkedList(*DelimiterStackItem), paragraph: *Block, stack_bottom: ?usize) !*Block {
-    var current_position = (stack_bottom orelse -1) + 1;
+/// Represents a parsed inline segment with its position in the source
+const InlineSegment = struct {
+    block: *Block,
+    start_pos: usize, 
+    end_pos: usize, 
+};
 
-    var star_openers_bottom = stack_bottom;
-    var underscore_openers_bottom = stack_bottom;
+/// Process emphasis according to CommonMark spec Appendix A
+/// Returns a list of inline segments that were created
+fn processEmphasis(allocator: Allocator, delimiter_stack: *std.DoublyLinkedList, stack_bottom: ?*std.DoublyLinkedList.Node, segments: *std.ArrayList(InlineSegment)) !void {
+    // Track the bottom of opener stacks for each delimiter type and length combination
+    var star_openers_bottom: [2]?*std.DoublyLinkedList.Node = .{ stack_bottom, stack_bottom };
+    var underscore_openers_bottom: [2]?*std.DoublyLinkedList.Node = .{ stack_bottom, stack_bottom };
 
-    var it = delimiter_stack.first;
-    var i = 0;
-    while (it) |node| : (i += 1) {
-        const item = node.data;
-        if (i < current_position or item.delimiter_type == .SquareBracket or item.delimiter_type == .ExcSquareBracket or !item.is_closer) continue;
+    // Start from the first node after stack_bottom, or from the beginning
+    var current_node: ?*std.DoublyLinkedList.Node = if (stack_bottom) |sb| sb.next else delimiter_stack.first;
 
-        var cur_node = node.prev;
-        const floor_node = if (item.delimiter_type == .Star) &star_openers_bottom else &underscore_openers_bottom;
+    while (current_node) |closer_node| {
+        const closer = DelimiterStackItem.fromNode(closer_node);
 
-        while (cur_node != floor_node) : (cur_node = cur_node.prev) {
-            if (cur_node.delimiter_type == node.delimiter_type) {
-                const block_type = if (cur_node.num_delimiters >= 2 and cur_node.num_delimiters >= 2) {
-                    BlockType.StrongEmph;
-                } else {
-                    BlockType.Emph;
+        // Skip non-emphasis delimiters and non-closers
+        if (closer.delimiter_type == .SquareBracket or closer.delimiter_type == .ExcSquareBracket or !closer.is_closer) {
+            current_node = closer_node.next;
+            continue;
+        }
+
+        // Find a matching opener
+        const openers_bottom = if (closer.delimiter_type == .Star)
+            &star_openers_bottom
+        else
+            &underscore_openers_bottom;
+
+        const odd_even_index: usize = if ((closer.is_opener and closer.is_closer) and (closer.num_delimiters % 3 != 0)) 1 else 0;
+        var opener_found = false;
+
+        // Search backwards for a matching opener
+        var search_node: ?*std.DoublyLinkedList.Node = closer_node.prev;
+        while (search_node) |opener_node| {
+            // Stop at the bottom
+            if (stack_bottom) |sb| {
+                if (opener_node == sb) break;
+            }
+            // Check openers_bottom
+            if (openers_bottom[odd_even_index]) |bottom| {
+                if (opener_node == bottom) break;
+            }
+
+            const opener = DelimiterStackItem.fromNode(opener_node);
+
+            // Check if this is a valid opener of the same type
+            if (opener.delimiter_type == closer.delimiter_type and opener.is_opener) {
+                // Check "multiple of 3" rule for mixed opener-closer
+                if ((opener.is_opener and opener.is_closer) or (closer.is_opener and closer.is_closer)) {
+                    if ((opener.num_delimiters + closer.num_delimiters) % 3 == 0) {
+                        if (opener.num_delimiters % 3 != 0 or closer.num_delimiters % 3 != 0) {
+                            search_node = opener_node.prev;
+                            continue;
+                        }
+                    }
+                }
+
+                opener_found = true;
+
+                // Determine strong vs regular emphasis
+                const use_strong = opener.num_delimiters >= 2 and closer.num_delimiters >= 2;
+                const delim_count: usize = if (use_strong) 2 else 1;
+                const block_type: BlockType = if (use_strong) .Strong else .Emphasis;
+
+                // Calculate positions - the content is between the delimiters we're consuming
+                const content_start = opener.start_index + opener.num_delimiters;
+                const content_end = closer.start_index;
+
+                // The full span includes the delimiters we're consuming
+                const span_start = opener.start_index + opener.num_delimiters - delim_count;
+                const span_end = closer.start_index + delim_count;
+
+                const emph_block = try allocator.create(Block);
+                emph_block.* = Block{
+                    .blockType = block_type,
+                    .content = null, // Will be filled later with nested content
+                    .children = std.ArrayList(*Block).empty,
+                    .is_open = false,
                 };
 
-                const section_text = paragraph.content[(cur_node.start_index + cur_node.num_delimiters)..(node.start_index - 1)];
-                const str_block = try allocator.create(Block);
-                // TODO: handle inlino
-                str_block.* = Block{ .blockType = .block_type, .content = section_text, .children = std.ArrayList(Block).empty, .is_open = false };
-                try paragraph.children.append(allocator, str_block);
+                try segments.append(allocator, InlineSegment{
+                    .block = emph_block,
+                    .start_pos = span_start,
+                    .end_pos = span_end,
+                });
 
-                cur_node.num_delimiters -= if (block_type == .StrongEmph) 2 else 1;
-                if (cur_node.num_delimiters == 0) delimiter_stack.remove(cur_node);
-                node.num_delimiters -= if (block_type == .StrongEmph) 2 else 1;
-                if (node.num_delimiters == 0) {
-                    delimiter_stack.remove(node);
-                    current_position = node.position;
+                // Store content range in the block temporarily
+                emph_block.content = @as([*]const u8, @ptrFromInt(content_start))[0..content_end];
+
+                // Remove nodes between opener and closer
+                var remove_node = opener_node.next;
+                while (remove_node) |rn| {
+                    if (rn == closer_node) break;
+                    const next = rn.next;
+                    delimiter_stack.remove(rn);
+                    remove_node = next;
+                }
+
+                // Update or remove opener
+                const opener_mut = DelimiterStackItem.fromNode(opener_node);
+                opener_mut.num_delimiters -= delim_count;
+                if (opener_mut.num_delimiters == 0) {
+                    delimiter_stack.remove(opener_node);
+                }
+
+                // Update or remove closer
+                closer.num_delimiters -= delim_count;
+                if (closer.num_delimiters == 0) {
+                    current_node = closer_node.next;
+                    delimiter_stack.remove(closer_node);
+                } else {
+                    // Stay on closer to process remaining delimiters
                 }
                 break;
             }
+
+            search_node = opener_node.prev;
         }
 
-        if (cur_node != floor_node) {
-            floor_node = cur_node.prev;
-        } else {
-            if (!cur_node.is_opener) {
-                delimiter_stack.remove(cur_node);
+        if (!opener_found) {
+            // No opener found, update openers_bottom
+            openers_bottom[odd_even_index] = closer_node.prev;
+
+            // If not an opener, remove it
+            if (!closer.is_opener) {
+                const next = closer_node.next;
+                delimiter_stack.remove(closer_node);
+                current_node = next;
+            } else {
+                current_node = closer_node.next;
             }
-            current_position = node.next.position;
         }
+    }
 
-        it = node.next;
+    // Remove remaining delimiters above stack_bottom
+    var remove_it: ?*std.DoublyLinkedList.Node = if (stack_bottom) |sb| sb.next else delimiter_stack.first;
+    while (remove_it) |node| {
+        const next = node.next;
+        delimiter_stack.remove(node);
+        remove_it = next;
     }
 }
 
-fn lookForLinkOrImage(allocator: Allocator, delimiter_stack: *std.DoublyLinkedList(*DelimiterStackItem), paragraph: *Block, content_position: usize) !*Block {
-    const it_reverse = delimiter_stack.last;
+/// Look for a link or image when we encounter a closing bracket ']'
+/// Returns the end position of the link/image (after the closing paren) if found, null otherwise
+fn lookForLinkOrImage(
+    allocator: Allocator,
+    delimiter_stack: *std.DoublyLinkedList,
+    content: []const u8,
+    close_bracket_pos: usize,
+    segments: *std.ArrayList(InlineSegment),
+) !?usize {
+    // Search backwards for an opener [ or ![
+    var search_node: ?*std.DoublyLinkedList.Node = delimiter_stack.last;
 
-    var still_processing = true;
-    while (it_reverse) |node| {
-        const item = node.data;
-        if (!still_processing and (item.delimiter_type == .SquareBracket or item.delimiter_type == .ExcSquareBracket)) {
-            item.is_active = false;
-        }
+    while (search_node) |node| {
+        const item = DelimiterStackItem.fromNode(node);
 
         if (item.delimiter_type == .SquareBracket or item.delimiter_type == .ExcSquareBracket) {
             if (!item.is_active) {
-                delimiter_stack.remove(item);
-            } else {
-                const section_text = paragraph.content[(item.start_index + 1)..(content_position - 1)];
-                const str_block = try allocator.create(Block);
-                // TODO: handle inlino
-                str_block.* = Block{ .blockType = .RawStr, .content = section_text, .children = std.ArrayList(Block).empty, .is_open = false };
-                try paragraph.children.append(allocator, str_block);
-
-                delimiter_stack.remove(item);
-                still_processing = false;
+                // Inactive opener, remove it and continue
+                const prev = node.prev;
+                delimiter_stack.remove(node);
+                search_node = prev;
+                continue;
             }
+
+            // Found an active opener - check what follows the ]
+            const after_close = close_bracket_pos + 1;
+            if (after_close < content.len and content[after_close] == '(') {
+                // Inline link: [text](url)
+                // Find the closing )
+                var paren_depth: usize = 1;
+                var url_end: ?usize = null;
+                var i = after_close + 1;
+                while (i < content.len) : (i += 1) {
+                    if (content[i] == '(') {
+                        paren_depth += 1;
+                    } else if (content[i] == ')') {
+                        paren_depth -= 1;
+                        if (paren_depth == 0) {
+                            url_end = i;
+                            break;
+                        }
+                    }
+                }
+
+                if (url_end) |end| {
+                    // Extract the link text and URL
+                    const opener_pos = if (item.delimiter_type == .ExcSquareBracket)
+                        item.start_index + 2 // skip ![
+                    else
+                        item.start_index + 1; // skip [
+
+                    const link_text = content[opener_pos..close_bracket_pos];
+                    const url = content[after_close + 1 .. end];
+
+                    const block_type: BlockType = if (item.delimiter_type == .ExcSquareBracket)
+                        BlockType{ .Image = url }
+                    else
+                        BlockType{ .Link = url };
+
+                    const link_block = try allocator.create(Block);
+                    link_block.* = Block{
+                        .blockType = block_type,
+                        .content = link_text,
+                        .children = std.ArrayList(*Block).empty,
+                        .is_open = false,
+                    };
+
+                    try segments.append(allocator, InlineSegment{
+                        .block = link_block,
+                        .start_pos = item.start_index,
+                        .end_pos = end + 1, // include the closing )
+                    });
+
+                    // Process emphasis within the link text (between opener and this node)
+                    try processEmphasis(allocator, delimiter_stack, node, segments);
+
+                    // Remove the opener
+                    delimiter_stack.remove(node);
+
+                    // Deactivate earlier [ openers (links can't be nested)
+                    if (item.delimiter_type == .SquareBracket) {
+                        var deactivate_node: ?*std.DoublyLinkedList.Node = delimiter_stack.last;
+                        while (deactivate_node) |dn| {
+                            const d_item = DelimiterStackItem.fromNode(dn);
+                            if (d_item.delimiter_type == .SquareBracket) {
+                                d_item.is_active = false;
+                            }
+                            deactivate_node = dn.prev;
+                        }
+                    }
+
+                    return end + 1;
+                }
+            }
+
+            // No valid link found, remove opener and continue
+            const prev = node.prev;
+            delimiter_stack.remove(node);
+            search_node = prev;
+            continue;
         }
 
-        it_reverse = node.prev;
+        search_node = node.prev;
     }
+
+    return null;
 }
 
 inline fn isAsciiPunctuation(c: u8) bool {
@@ -379,66 +557,178 @@ inline fn isAsciiPunctuation(c: u8) bool {
         else => false,
     };
 }
-fn parseInline(allocator: Allocator, current_block: *Block) !void {
-    if (current_block.blockType == .Paragraph) {
-        //TODO: where all the complexity happens
-        var stack = std.DoublyLinkedList(DelimiterStackItem).empty;
-        const content = current_block.content orelse unreachable;
+
+fn appendDelimiter(allocator: Allocator, stack: *std.DoublyLinkedList, delimiter_type: InlineDelimiterType, num_delimiters: usize, start_index: usize, is_opener: bool, is_closer: bool) !void {
+    const item = try allocator.create(DelimiterStackItem);
+    item.* = DelimiterStackItem{
+        .delimiter_type = delimiter_type,
+        .num_delimiters = num_delimiters,
+        .start_index = start_index,
+        .is_active = true,
+        .is_opener = is_opener,
+        .is_closer = is_closer,
+        .node = .{},
+    };
+    stack.append(&item.node);
+}
+
+fn compareSegments(_: void, a: InlineSegment, b: InlineSegment) bool {
+    return a.start_pos < b.start_pos;
+}
+
+/// Build the final inline children from segments, filling in RawStr for gaps
+fn buildInlineChildren(allocator: Allocator, content: []const u8, segments: *std.ArrayList(InlineSegment), parent: *Block) !void {
+    // Sort segments by start position
+    std.mem.sort(InlineSegment, segments.items, {}, compareSegments);
+
+    var last_pos: usize = 0;
+
+    for (segments.items) |segment| {
+        // Add RawStr for any text before this segment
+        if (segment.start_pos > last_pos) {
+            const text = content[last_pos..segment.start_pos];
+            const raw_block = try allocator.create(Block);
+            raw_block.* = Block{
+                .blockType = .RawStr,
+                .content = text,
+                .children = std.ArrayList(*Block).empty,
+                .is_open = false,
+            };
+            try parent.children.append(allocator, raw_block);
+        }
+
+        // Fix the content pointer for emphasis blocks (was storing indices, not actual content)
+        if (segment.block.blockType == .Emphasis or segment.block.blockType == .Strong) {
+            // The content was temporarily stored as fake pointer with indices
+            // Extract the range and set actual content
+            const fake_slice = segment.block.content orelse "";
+            const content_start = @intFromPtr(fake_slice.ptr);
+            const content_end = fake_slice.len;
+            if (content_end > content_start and content_end <= content.len) {
+                segment.block.content = content[content_start..content_end];
+            } else {
+                segment.block.content = null;
+            }
+        }
+
+        try parent.children.append(allocator, segment.block);
+        last_pos = segment.end_pos;
+    }
+
+    // Add RawStr for any remaining text after the last segment
+    if (last_pos < content.len) {
+        const text = content[last_pos..];
+        const raw_block = try allocator.create(Block);
+        raw_block.* = Block{
+            .blockType = .RawStr,
+            .content = text,
+            .children = std.ArrayList(*Block).empty,
+            .is_open = false,
+        };
+        try parent.children.append(allocator, raw_block);
+    }
+}
+
+pub fn parseInline(allocator: Allocator, current_block: *Block) !void {
+    if (current_block.blockType == .Paragraph or current_block.blockType == .Heading) {
+        var stack: std.DoublyLinkedList = .{};
+        var segments = std.ArrayList(InlineSegment).empty;
+        const content = current_block.content orelse return;
         const len = content.len;
-        var i = 0;
+        var i: usize = 0;
+
         while (i < len) {
             switch (content[i]) {
                 '[' => {
-                    try stack.append(allocator, DelimiterStackItem{ .delimiter_type = .SquareBracket, .num_delimiters = 1, .start_index = i, .is_opener = true, .is_closer = false });
+                    try appendDelimiter(allocator, &stack, .SquareBracket, 1, i, true, false);
+                    i += 1;
                 },
                 '!' => {
                     if (i + 1 < len and content[i + 1] == '[') {
-                        try stack.append(allocator, DelimiterStackItem{ .delimiter_type = .ExcSquareBracket, .num_delimiters = 1, .start_index = i, .is_opener = true, .is_closer = false });
+                        try appendDelimiter(allocator, &stack, .ExcSquareBracket, 1, i, true, false);
+                        i += 2;
+                    } else {
+                        i += 1;
                     }
                 },
                 '_' => {
                     const orig_i = i;
-                    var num_delimiters = 1;
-                    while (i + 1 < len and content[i] == '_') {
+                    var num_delimiters: usize = 0;
+                    while (i < len and content[i] == '_') {
                         num_delimiters += 1;
                         i += 1;
                     }
 
-                    const precedes_punct = orig_i - 1 >= 0 and isAsciiPunctuation(content[orig_i - 1]);
-                    const follows_punct = i + 1 < len and isAsciiPunctuation(content[i + 1]);
-                    // left flanking - https://spec.commonmark.org/0.27/#left-flanking-delimiter-run
-                    const is_left_flanking = (i + 1 < len and !std.ascii.isWhitespace(content[i + 1]) and (!isAsciiPunctuation(content[i + 1]) or precedes_punct or (orig_i - 1 >= 0 and std.ascii.isWhitespace(content[orig_i - 1]))));
-                    // right flanking - https://spec.commonmark.org/0.27/#right-flanking-delimiter-run
-                    const is_right_flanking = (orig_i - 1 >= 0 and !std.ascii.isWhitespace(content[orig_i - 1]) and (!isAsciiPunctuation(content[orig_i - 1]) or follows_punct or (i + 1 < len and std.ascii.isWhitespace(content[i + 1]))));
+                    const char_before: ?u8 = if (orig_i > 0) content[orig_i - 1] else null;
+                    const char_after: ?u8 = if (i < len) content[i] else null;
 
+                    const precedes_whitespace = char_before == null or std.ascii.isWhitespace(char_before.?);
+                    const precedes_punct = char_before != null and isAsciiPunctuation(char_before.?);
+                    const follows_whitespace = char_after == null or std.ascii.isWhitespace(char_after.?);
+                    const follows_punct = char_after != null and isAsciiPunctuation(char_after.?);
+
+                    // Left-flanking: not followed by whitespace, and either not followed by punctuation
+                    // or preceded by whitespace or punctuation
+                    const is_left_flanking = !follows_whitespace and (!follows_punct or precedes_whitespace or precedes_punct);
+                    // Right-flanking: not preceded by whitespace, and either not preceded by punctuation
+                    // or followed by whitespace or punctuation
+                    const is_right_flanking = !precedes_whitespace and (!precedes_punct or follows_whitespace or follows_punct);
+
+                    // For underscore: opener if left-flanking and (not right-flanking or preceded by punct)
                     const is_opener = is_left_flanking and (!is_right_flanking or precedes_punct);
+                    // For underscore: closer if right-flanking and (not left-flanking or followed by punct)
                     const is_closer = is_right_flanking and (!is_left_flanking or follows_punct);
 
                     if (is_opener or is_closer) {
-                        try stack.append(allocator, DelimiterStackItem{ .delimiter_type = .Underscore, .num_delimiters = num_delimiters, .start_index = orig_i, .is_opener = is_opener, .is_closer = is_closer });
+                        try appendDelimiter(allocator, &stack, .Underscore, num_delimiters, orig_i, is_opener, is_closer);
                     }
                 },
                 '*' => {
                     const orig_i = i;
-                    var num_delimiters = 1;
-                    while (i + 1 < len and content[i] == '*') {
+                    var num_delimiters: usize = 0;
+                    while (i < len and content[i] == '*') {
                         num_delimiters += 1;
                         i += 1;
                     }
 
-                    // left flanking - https://spec.commonmark.org/0.27/#left-flanking-delimiter-run
-                    const is_opener = (i + 1 < len and !std.ascii.isWhitespace(content[i + 1]) and (!isAsciiPunctuation(content[i + 1]) or (orig_i - 1 >= 0 and (std.ascii.isWhitespace(content[orig_i - 1]) or isAsciiPunctuation(content[orig_i - 1])))));
-                    // right flanking - https://spec.commonmark.org/0.27/#right-flanking-delimiter-run
-                    const is_closer = (orig_i - 1 >= 0 and !std.ascii.isWhitespace(content[orig_i - 1]) and (!isAsciiPunctuation(content[orig_i - 1]) or (i + 1 < len and (std.ascii.isWhitespace(content[i + 1]) or isAsciiPunctuation(content[i + 1])))));
+                    const char_before: ?u8 = if (orig_i > 0) content[orig_i - 1] else null;
+                    const char_after: ?u8 = if (i < len) content[i] else null;
 
-                    try stack.append(allocator, DelimiterStackItem{ .delimiter_type = .Star, .num_delimiters = num_delimiters, .start_index = orig_i, .is_opener = is_opener, .is_closer = is_closer });
+                    const precedes_whitespace = char_before == null or std.ascii.isWhitespace(char_before.?);
+                    const precedes_punct = char_before != null and isAsciiPunctuation(char_before.?);
+                    const follows_whitespace = char_after == null or std.ascii.isWhitespace(char_after.?);
+                    const follows_punct = char_after != null and isAsciiPunctuation(char_after.?);
+
+                    // Left-flanking delimiter run
+                    const is_left_flanking = !follows_whitespace and (!follows_punct or precedes_whitespace or precedes_punct);
+                    // Right-flanking delimiter run
+                    const is_right_flanking = !precedes_whitespace and (!precedes_punct or follows_whitespace or follows_punct);
+
+                    // For asterisk: opener if left-flanking
+                    const is_opener = is_left_flanking;
+                    // For asterisk: closer if right-flanking
+                    const is_closer = is_right_flanking;
+
+                    if (is_opener or is_closer) {
+                        try appendDelimiter(allocator, &stack, .Star, num_delimiters, orig_i, is_opener, is_closer);
+                    }
                 },
                 ']' => {
-                    try lookForLinkOrImage(&stack, content, i);
+                    if (try lookForLinkOrImage(allocator, &stack, content, i, &segments)) |end_pos| {
+                        i = end_pos;
+                    } else {
+                        i += 1;
+                    }
                 },
                 else => i += 1,
             }
         }
+
+        // Process remaining emphasis delimiters
+        try processEmphasis(allocator, &stack, null, &segments);
+
+        // Build the final inline children with RawStr for gaps
+        try buildInlineChildren(allocator, content, &segments, current_block);
     } else {
         for (current_block.children.items) |child_block| {
             try parseInline(allocator, child_block);
@@ -540,4 +830,65 @@ test "block parser" {
     printBlock(markdown_blocks, 0);
 
     try std.testing.expectEqualDeep(markdown_blocks_expected, markdown_blocks);
+}
+
+test "inline parser" {
+    // Test document with various inline elements:
+    // - Heading with *emphasis*
+    // - Paragraph with *emphasis*, **strong**, _underscore emphasis_
+    // - Links [text](url) and images ![alt](url)
+    // - Multiple emphasis in one line
+    const markdown_text =
+        \\## A *formatted* heading
+        \\This has *emphasis* and **strong** and _underscore emphasis_.
+        \\Here is a [link](https://ziglang.org) and an ![image](https://example.com/img.png).
+        \\Multiple *first* and *second* emphasis in one line.
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Expected structure after block + inline parsing
+    // Note: block parser joins consecutive lines into one paragraph
+    const paragraph_content = "This has *emphasis* and **strong** and _underscore emphasis_.\n" ++
+        "Here is a [link](https://ziglang.org) and an ![image](https://example.com/img.png).\n" ++
+        "Multiple *first* and *second* emphasis in one line.";
+
+    const expected = try block(allocator, .Document, &.{
+        // Heading with emphasis and RawStr for plain text
+        try block(allocator, .{ .Heading = 2 }, &.{
+            try block(allocator, .RawStr, &.{}, "## A "),
+            try block(allocator, .Emphasis, &.{}, "formatted"),
+            try block(allocator, .RawStr, &.{}, " heading"),
+        }, "## A *formatted* heading"),
+        // Single paragraph containing all inline elements with RawStr for plain text
+        try block(allocator, .Paragraph, &.{
+            try block(allocator, .RawStr, &.{}, "This has "),
+            try block(allocator, .Emphasis, &.{}, "emphasis"),
+            try block(allocator, .RawStr, &.{}, " and "),
+            try block(allocator, .Strong, &.{}, "strong"),
+            try block(allocator, .RawStr, &.{}, " and "),
+            try block(allocator, .Emphasis, &.{}, "underscore emphasis"),
+            try block(allocator, .RawStr, &.{}, ".\nHere is a "),
+            try block(allocator, .{ .Link = "https://ziglang.org" }, &.{}, "link"),
+            try block(allocator, .RawStr, &.{}, " and an "),
+            try block(allocator, .{ .Image = "https://example.com/img.png" }, &.{}, "image"),
+            try block(allocator, .RawStr, &.{}, ".\nMultiple "),
+            try block(allocator, .Emphasis, &.{}, "first"),
+            try block(allocator, .RawStr, &.{}, " and "),
+            try block(allocator, .Emphasis, &.{}, "second"),
+            try block(allocator, .RawStr, &.{}, " emphasis in one line."),
+        }, paragraph_content),
+    }, null);
+
+    // Parse blocks first
+    const document = try parseBlocks(allocator, markdown_text);
+
+    // Then parse inline content
+    try parseInline(allocator, document);
+
+    printBlock(document, 0);
+
+    try std.testing.expectEqualDeep(expected, document);
 }
