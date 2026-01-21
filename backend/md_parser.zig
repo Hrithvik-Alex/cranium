@@ -770,6 +770,9 @@ pub fn parseInline(allocator: Allocator, current_block: *Block) !void {
 
         // Build the final inline children with RawStr for gaps
         try buildInlineChildren(allocator, content, &segments, current_block);
+
+        // Clear the content since it's now represented in children
+        current_block.content = null;
     } else {
         for (current_block.children.items) |child_block| {
             try parseInline(allocator, child_block);
@@ -892,17 +895,13 @@ test "inline parser" {
 
     // Expected structure after block + inline parsing
     // Note: block parser joins consecutive lines into one paragraph
-    const paragraph_content = "This has *emphasis* and **strong** and _underscore emphasis_.\n" ++
-        "Here is a [link](https://ziglang.org) and an ![image](https://example.com/img.png).\n" ++
-        "Multiple *first* and *second* emphasis in one line.";
-
     const expected = try block(allocator, .Document, &.{
         // Heading with emphasis and RawStr for plain text
         try block(allocator, .{ .Heading = 2 }, &.{
             try block(allocator, .RawStr, &.{}, "## A "),
             try block(allocator, .Emphasis, &.{}, "formatted"),
             try block(allocator, .RawStr, &.{}, " heading"),
-        }, "## A *formatted* heading"),
+        }, null),
         // Single paragraph containing all inline elements with RawStr for plain text
         try block(allocator, .Paragraph, &.{
             try block(allocator, .RawStr, &.{}, "This has "),
@@ -920,7 +919,7 @@ test "inline parser" {
             try block(allocator, .RawStr, &.{}, " and "),
             try block(allocator, .Emphasis, &.{}, "second"),
             try block(allocator, .RawStr, &.{}, " emphasis in one line."),
-        }, paragraph_content),
+        }, null),
     }, null);
 
     // Parse blocks first
