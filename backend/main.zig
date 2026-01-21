@@ -6,7 +6,7 @@ pub fn main() !void {
 
     // Example usage of your tokenizer
     const text = "Hello *world* with _emphasis_";
-    var tokens = try backend.tokenizer.tokenize(allocator, text);
+    var tokens = try backend.md_parser.tokenize(allocator, text);
     defer tokens.deinit(allocator);
 
     std.debug.print("Tokenized {} tokens\n", .{tokens.items.len});

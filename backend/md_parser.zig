@@ -8,13 +8,28 @@ const RawToken = union(enum) {
     text: []const u8,
 };
 
-// fn parse() {
-//     std
-// }
-//
-//
+// We need to do this splitting so that we can export to C
+pub const BlockTypeTag = enum(c_int) {
+    // block types
+    Document = 0,
+    Paragraph = 1,
+    Heading = 2,
+    CodeBlock = 3,
+    BlockQuote = 4,
+    OrderedList = 5,
+    OrderedListItem = 6,
+    UnorderedList = 7,
+    UnorderedListItem = 8,
+    // inline types
+    RawStr = 9,
+    Strong = 10,
+    Emphasis = 11,
+    StrongEmph = 12,
+    Link = 13,
+    Image = 14,
+};
 
-const BlockType = union(enum) {
+pub const BlockType = union(BlockTypeTag) {
     // block
     Document: void,
     Paragraph: void,
@@ -35,14 +50,33 @@ const BlockType = union(enum) {
 
     pub fn format(
         self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
         try writer.print("{s}", .{@tagName(self)});
         switch (self) {
             .Heading => |level| try writer.print(" - l{x}", .{level}),
             .OrderedList, .OrderedListItem, .UnorderedList, .UnorderedListItem => |depth| try writer.print(" - depth {x}", .{depth}),
             else => {},
         }
+    }
+
+    /// Get the numeric value (heading level, list depth, etc.)
+    pub fn getValue(self: @This()) usize {
+        return switch (self) {
+            .Heading => |level| @intCast(level),
+            .BlockQuote, .OrderedList, .OrderedListItem, .UnorderedList, .UnorderedListItem => |depth| depth,
+            else => 0,
+        };
+    }
+
+    /// Get the string value for Link/Image URL
+    pub fn getStr(self: @This()) ?[]const u8 {
+        return switch (self) {
+            .Link, .Image => |url| url,
+            else => null,
+        };
     }
 };
 
@@ -83,7 +117,8 @@ fn isOrderedNumber(word: []const u8) bool {
     return maybeInt and (word[word.len - 1] == '.');
 }
 
-const Block = struct {
+/// Block struct for parsing (Zig-friendly types).
+pub const Block = struct {
     blockType: BlockType,
     children: std.ArrayList(*Block),
     content: ?[]const u8,
@@ -99,12 +134,18 @@ const Block = struct {
             .CodeBlock => true, // handled in handleBlockType
             .UnorderedList => |depth| depth < first_word_depth or (depth == first_word_depth and std.mem.eql(u8, first_word, "-")),
             .OrderedListItem => |depth| depth < first_word_depth,
-            .OrderedList => |depth| {
-                return depth <= first_word_depth and isOrderedNumber(first_word);
-            },
-            BlockType.UnorderedListItem => |depth| depth < first_word_depth,
+            .OrderedList => |depth| depth <= first_word_depth and isOrderedNumber(first_word),
+            .UnorderedListItem => |depth| depth < first_word_depth,
             .RawStr, .Strong, .Emphasis, .Link, .StrongEmph, .Image => unreachable, // inline
         };
+    }
+
+    pub fn deinit(self: *Block, allocator: Allocator) void {
+        for (self.children.items) |child| {
+            child.deinit(allocator);
+        }
+        self.children.deinit(allocator);
+        allocator.destroy(self);
     }
 };
 
@@ -238,7 +279,7 @@ pub fn parseBlocks(allocator: Allocator, text: []const u8) !*Block {
     var lines = std.mem.tokenizeAny(u8, text, "\n");
 
     const document_block = try allocator.create(Block);
-    document_block.* = (Block{ .blockType = .Document, .children = std.ArrayList(*Block).empty, .content = null });
+    document_block.* = Block{ .blockType = .Document, .children = std.ArrayList(*Block).empty, .content = null };
 
     var block_stack = std.ArrayList(*Block).empty;
     try block_stack.append(allocator, document_block);
@@ -263,7 +304,7 @@ pub fn parseBlocks(allocator: Allocator, text: []const u8) !*Block {
             block_stack.items[block_stack.items.len - 1].is_open = false; //TODO: this line feels a bit sus, can I do this if its not paragraph?
             continue;
         };
-        std.debug.print("what that line do: \"{s}\", block_type: {f}\n", .{ line, block_type });
+        std.debug.print("what that line do: \"{s}\", block_type: {any}\n", .{ line, block_type });
         try handleBlockType(allocator, &block_stack, block_type, line, text);
     }
 
@@ -299,8 +340,8 @@ const DelimiterStackItem = struct {
 /// Represents a parsed inline segment with its position in the source
 const InlineSegment = struct {
     block: *Block,
-    start_pos: usize, 
-    end_pos: usize, 
+    start_pos: usize,
+    end_pos: usize,
 };
 
 /// Process emphasis according to CommonMark spec Appendix A
@@ -740,7 +781,7 @@ fn printBlock(b: *Block, depth: usize) void {
     for (0..depth) |_| {
         std.debug.print("  ", .{});
     }
-    std.debug.print("type: {f}, ", .{b.blockType});
+    std.debug.print("type: {any}, ", .{b.blockType});
     if (b.content != null) {
         std.debug.print("content: \"{s}\", ", .{b.content.?});
     }

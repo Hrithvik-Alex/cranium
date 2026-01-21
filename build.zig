@@ -58,13 +58,13 @@ pub fn build(b: *std.Build) void {
     // This allows ZLS to compile and check for errors on save
     // We check both the backend module and the main executable
     const check_step = b.step("check", "Check the code for errors");
-    
+
     // Check the backend module by creating a test that imports it
     const backend_check = b.addTest(.{
         .root_module = backend_mod,
     });
     check_step.dependOn(&b.addRunArtifact(backend_check).step);
-    
+
     // Also check the main executable
     const check_exe = b.addExecutable(.{
         .name = "check",
