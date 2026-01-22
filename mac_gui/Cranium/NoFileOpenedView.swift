@@ -52,9 +52,22 @@ struct NoFileOpenedView : View {
                     NewFileCreationView(isPresented: $showingFileCreationSheet) { fileName in
                         navigateToFile = true
                         showingFileCreationSheet = false
+                        
+                        // Create file using Zig backend
+                        let fullPath: String
+                        if let directoryURL = resolveSecurityScopedBookmark() {
+                            guard directoryURL.startAccessingSecurityScopedResource() else { return }
+                            defer { directoryURL.stopAccessingSecurityScopedResource() }
+                            fullPath = directoryURL.appendingPathComponent(fileName).path
+                        } else {
+                            fullPath = "\(fileDirectory)/\(fileName)"
+                        }
+                        
+                        _ = fullPath.withCString { cString in
+                            createFile(cString)
+                        }
+                        
                         vaultManager.currentFile = fileName
-                        //TODO: replace with zig?
-                        FileManager.default.createFile(atPath: "\(fileDirectory)/\(fileName)", contents: Data())
                     }
                 }
                 

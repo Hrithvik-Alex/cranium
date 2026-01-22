@@ -9,18 +9,25 @@ import SwiftUI
 
 @Observable
 class FileViewModel {
-    /// Pointer to the root CBlock (Document) from the Zig parser
-    /// nil if no file has been parsed or parsing failed
-    var documentBlock: UnsafeMutablePointer<CBlock>?
+    /// Pointer to the CDocument handle from the Zig parser
+    /// nil if no file has been opened or opening failed
+    private var document: UnsafeMutablePointer<CDocument>?
     
     /// Error message if parsing failed
     var errorMessage: String?
     
-    /// Parse a markdown file and store the resulting document block
+    /// Get the root block from the document (if available)
+    var documentBlock: UnsafeMutablePointer<CBlock>? {
+        document?.pointee.root_block
+    }
+    
+    /// Open and parse a markdown file
     /// - Parameter filePath: Absolute path to the markdown file
-    func parseFile(_ filePath: String) {
-        // Reset state
-        documentBlock = nil
+    func openFile(_ filePath: String) {
+        // Close any previously opened document first
+        closeFile()
+        
+        // Reset error state
         errorMessage = nil
         
         // Standardize the path (resolve . and ..)
@@ -38,19 +45,32 @@ class FileViewModel {
             return
         }
         
-        // getMarkdownBlocks expects a null-terminated C string with absolute path
-        documentBlock = standardizedPath.withCString { cString in
-            getMarkdownBlocks(cString)
+        // openDocument expects a null-terminated C string with absolute path
+        document = standardizedPath.withCString { cString in
+            openDocument(cString)
         }
         
-        if documentBlock == nil {
+        if document == nil {
             errorMessage = "Failed to parse markdown file"
         }
     }
     
+    /// Close the current document and free all associated resources
+    func closeFile() {
+        if document != nil {
+            closeDocument(document)
+            document = nil
+        }
+        errorMessage = nil
+    }
+    
     /// Check if we have a valid parsed document
     var hasDocument: Bool {
-        documentBlock != nil
+        document != nil && documentBlock != nil
+    }
+    
+    deinit {
+        closeFile()
     }
 }
 
@@ -135,26 +155,27 @@ struct FileView: View {
             Spacer()
         }
         .onAppear {
-            // Resolve the security-scoped bookmark to get access
-            if let directoryURL = resolveSecurityScopedBookmark() {
-                // Start accessing security-scoped resource
-                guard directoryURL.startAccessingSecurityScopedResource() else {
-                    viewModel.errorMessage = "Failed to access folder (sandbox permission denied)"
-                    return
-                }
-                
-                // Combine base directory with filename to get full path
-                let fullPath = directoryURL.appendingPathComponent(fileName).path
-                viewModel.parseFile(fullPath)
-                
-                // Note: We don't stop accessing here because the Zig code needs ongoing access
-                // to read the file. In a production app, you'd want better lifecycle management.
-            } else {
-                // Fallback to direct path
-                let fullPath = (baseDirectory as NSString).appendingPathComponent(fileName)
-                viewModel.parseFile(fullPath)
-            }
+            loadFile()
         }
+        .onChange(of: fileName) { _, _ in
+            loadFile()
+        }
+    }
+    
+    private func loadFile() {
+        let fullPath: String
+        
+        if let directoryURL = resolveSecurityScopedBookmark() {
+            guard directoryURL.startAccessingSecurityScopedResource() else {
+                viewModel.errorMessage = "Failed to access folder (sandbox permission denied)"
+                return
+            }
+            fullPath = directoryURL.appendingPathComponent(fileName).path
+        } else {
+            fullPath = (baseDirectory as NSString).appendingPathComponent(fileName)
+        }
+        
+        viewModel.openFile(fullPath)
     }
 }
 

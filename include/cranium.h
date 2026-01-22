@@ -43,7 +43,7 @@ typedef enum
  *
  * This structure represents a node in the markdown AST.
  * All string pointers point into the original file buffer and remain valid
- * as long as the CBlock tree is not freed.
+ * as long as the CDocument is not closed.
  */
 typedef struct CBlock
 {
@@ -81,17 +81,43 @@ typedef struct CBlock
 } CBlock;
 
 /**
- * Parse a markdown file and return a C-compatible Block tree.
+ * Document handle that owns its own arena allocator.
+ * When the document is closed, the entire arena is freed at once.
+ */
+typedef struct CDocument
+{
+    /** Pointer to the root CBlock (Document node) */
+    CBlock *root_block;
+
+    /** Opaque pointer to the document's arena allocator (internal use) */
+    void *arena_ptr;
+} CDocument;
+
+/**
+ * Open and parse a markdown file, returning a document handle.
  *
  * @param filename Null-terminated C string containing the absolute path to the markdown file.
- * @return Pointer to the root CBlock (Document) on success, or NULL on error.
- *         The returned CBlock tree is ready for C consumption.
- *         All string data (content, URLs) point into the file buffer and remain valid
- *         as long as the CBlock tree is not freed.
- *
- * @note The caller is responsible for managing the CBlock's lifetime.
- *       Currently there is no free function; the memory is allocated from page_allocator.
+ * @return Pointer to a CDocument handle on success, or NULL on error.
+ *         The caller is responsible for calling closeDocument() to free resources.
  */
-CBlock *getMarkdownBlocks(const char *filename);
+CDocument *openDocument(const char *filename);
+
+/**
+ * Close a document and free all associated resources.
+ *
+ * @param doc Pointer to the CDocument to close. May be NULL (no-op).
+ *
+ * After calling this function, the document pointer and all CBlock pointers
+ * derived from it are invalid and must not be used.
+ */
+void closeDocument(CDocument *doc);
+
+/**
+ * Create a new empty file at the specified path.
+ *
+ * @param filename Null-terminated C string containing the absolute path for the new file.
+ * @return 0 on success, -1 on error.
+ */
+int createFile(const char *filename);
 
 #endif /* CRANIUM_H */
