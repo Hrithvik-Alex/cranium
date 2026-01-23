@@ -248,11 +248,11 @@ struct BlockTreeView: View {
             
         case BlockType_CodeBlock:
             // Code blocks have children that contain the actual code
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 0) {
                 ForEach(0..<block.children.count, id: \.self) { index in
                     if let text = block.children[index].content {
-                        // Strip the > prefix from block quotes if present
-                        let cleanText = text.hasPrefix("> ") ? String(text.dropFirst(2)) : text
+                        // Strip block quote markers from each line (for code inside blockquotes)
+                        let cleanText = stripBlockQuoteMarkers(text)
                         Text(cleanText)
                     }
                 }
@@ -278,9 +278,10 @@ struct BlockTreeView: View {
             
         case BlockType_OrderedList:
             // Render children (list items) with numbers
+            let orderedChildren = block.children
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(0..<block.children.count, id: \.self) { index in
-                    BlockTreeView(block: block.children[index], depth: depth + 1)
+                ForEach(Array(orderedChildren.enumerated()), id: \.offset) { index, child in
+                    OrderedListItemView(block: child, number: index + 1, depth: depth + 1)
                 }
             }
             
@@ -293,10 +294,12 @@ struct BlockTreeView: View {
             }
             
         case BlockType_OrderedListItem:
-            // List items contain children (usually paragraphs)
-            HStack(alignment: .top, spacing: 8) {
-                Text("•")
+            // This case is handled by OrderedListItemView when rendered from OrderedList
+            // Fallback for direct rendering (shouldn't happen normally)
+            HStack(alignment: .top, spacing: 4) {
+                Text("?.")
                     .foregroundColor(.secondary)
+                    .frame(width: 24, alignment: .leading)
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(0..<block.children.count, id: \.self) { index in
                         BlockTreeView(block: block.children[index], depth: depth + 1)
@@ -306,9 +309,10 @@ struct BlockTreeView: View {
             
         case BlockType_UnorderedListItem:
             // List items contain children (usually paragraphs)
-            HStack(alignment: .top, spacing: 8) {
+            HStack(alignment: .top, spacing: 4) {
                 Text("•")
                     .foregroundColor(.secondary)
+                    .frame(width: 24, alignment: .leading)
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(0..<block.children.count, id: \.self) { index in
                         BlockTreeView(block: block.children[index], depth: depth + 1)
@@ -370,33 +374,80 @@ struct BlockTreeView: View {
     }
     
     /// Strip list markers (- , * , 1. ) from the beginning of a list item line
+    /// Also strips block quote markers (>) from all lines in multi-line content
+    /// Note: Only strips leading markers, preserves trailing whitespace for inline content
     func stripListMarker(_ text: String) -> String {
-        var result = text
-        // Remove leading whitespace
-        result = result.trimmingCharacters(in: .whitespaces)
-        
-        // Check for unordered list markers: -, *, +
-        if result.hasPrefix("- ") || result.hasPrefix("* ") || result.hasPrefix("+ ") {
-            return String(result.dropFirst(2)).trimmingCharacters(in: .whitespaces)
-        }
-        
-        // Check for ordered list markers: 1. 2. etc.
-        if let dotIndex = result.firstIndex(of: ".") {
-            let prefix = result[..<dotIndex]
-            if prefix.allSatisfy({ $0.isNumber }) {
-                let afterDot = result.index(after: dotIndex)
-                if afterDot < result.endIndex {
-                    return String(result[afterDot...]).trimmingCharacters(in: .whitespaces)
+        // Handle multi-line content - strip block quote markers from each line
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let processedLines = lines.enumerated().map { (index, line) -> String in
+            var result = String(line)
+            
+            // Strip block quote markers from all lines
+            while result.hasPrefix("> ") || result.hasPrefix(">") {
+                if result.hasPrefix("> ") {
+                    result = String(result.dropFirst(2))
+                } else {
+                    result = String(result.dropFirst())
                 }
             }
+            
+            // Only strip list markers from the first line
+            if index == 0 {
+                // Remove leading whitespace only (not trailing!)
+                while result.hasPrefix(" ") || result.hasPrefix("\t") {
+                    result = String(result.dropFirst())
+                }
+                
+                // Check for unordered list markers: -, *, +
+                if result.hasPrefix("- ") || result.hasPrefix("* ") || result.hasPrefix("+ ") {
+                    result = String(result.dropFirst(2))
+                    // Strip leading whitespace from after the marker
+                    while result.hasPrefix(" ") || result.hasPrefix("\t") {
+                        result = String(result.dropFirst())
+                    }
+                    return result
+                }
+                
+                // Check for ordered list markers: 1. 2. etc.
+                if let dotIndex = result.firstIndex(of: ".") {
+                    let prefix = result[..<dotIndex]
+                    if prefix.allSatisfy({ $0.isNumber }) {
+                        let afterDot = result.index(after: dotIndex)
+                        if afterDot < result.endIndex {
+                            result = String(result[afterDot...])
+                            // Strip leading whitespace from after the marker
+                            while result.hasPrefix(" ") || result.hasPrefix("\t") {
+                                result = String(result.dropFirst())
+                            }
+                            return result
+                        }
+                    }
+                }
+            }
+            
+            return result
         }
         
-        // Check for block quote markers
-        if result.hasPrefix("> ") {
-            return String(result.dropFirst(2))
-        }
-        
-        return result
+        return processedLines.joined(separator: "\n")
+    }
+    
+    /// Strip block quote markers (>) from each line in the text
+    /// Handles multi-line content like code inside block quotes
+    func stripBlockQuoteMarkers(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line in
+                var result = String(line)
+                // Strip all leading '>' and whitespace
+                while result.hasPrefix("> ") || result.hasPrefix(">") {
+                    if result.hasPrefix("> ") {
+                        result = String(result.dropFirst(2))
+                    } else {
+                        result = String(result.dropFirst())
+                    }
+                }
+                return result
+            }
+            .joined(separator: "\n")
     }
     
     func headingFont(level: Int) -> Font {
@@ -434,9 +485,12 @@ struct InlineTextView: View {
     func textForInlineBlock(_ child: UnsafeMutablePointer<CBlock>, stripFirst: Bool) -> Text {
         var content = child.content ?? ""
         
-        // Strip marker from first RawStr if needed
+        // Strip marker from first RawStr if needed (includes list markers and block quotes)
         if stripFirst && child.blockType == BlockType_RawStr, let strip = stripMarker {
             content = strip(content)
+        } else if child.blockType == BlockType_RawStr {
+            // For non-first RawStr, still strip block quote markers from each line
+            content = stripBlockQuoteMarkersFromContent(content)
         }
         
         switch child.blockType {
@@ -455,6 +509,41 @@ struct InlineTextView: View {
             return Text(content)
         }
     }
+    
+    /// Strip block quote markers (>) from each line in multi-line content
+    private func stripBlockQuoteMarkersFromContent(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line in
+                var result = String(line)
+                while result.hasPrefix("> ") || result.hasPrefix(">") {
+                    if result.hasPrefix("> ") {
+                        result = String(result.dropFirst(2))
+                    } else {
+                        result = String(result.dropFirst())
+                    }
+                }
+                return result
+            }
+            .joined(separator: "\n")
+    }
 }
 
-
+/// Renders an ordered list item with its number
+struct OrderedListItemView: View {
+    let block: UnsafeMutablePointer<CBlock>
+    let number: Int
+    let depth: Int
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 4) {
+            Text("\(number).")
+                .foregroundColor(.secondary)
+                .frame(width: 24, alignment: .leading)
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(0..<block.children.count, id: \.self) { index in
+                    BlockTreeView(block: block.children[index], depth: depth + 1)
+                }
+            }
+        }
+    }
+}

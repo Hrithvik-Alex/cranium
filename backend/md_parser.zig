@@ -132,9 +132,11 @@ pub const Block = struct {
             .Paragraph => true,
             .Heading => false,
             .CodeBlock => true, // handled in handleBlockType
+            // Lists can continue if: nested content (more indented) OR same-level list item
             .UnorderedList => |depth| depth < first_word_depth or (depth == first_word_depth and std.mem.eql(u8, first_word, "-")),
+            .OrderedList => |depth| depth < first_word_depth or (depth == first_word_depth and isOrderedNumber(first_word)),
+            // List items can continue if content is more indented (nested)
             .OrderedListItem => |depth| depth < first_word_depth,
-            .OrderedList => |depth| depth <= first_word_depth and isOrderedNumber(first_word),
             .UnorderedListItem => |depth| depth < first_word_depth,
             .RawStr, .Strong, .Emphasis, .Link, .StrongEmph, .Image => unreachable, // inline
         };
@@ -162,14 +164,27 @@ fn determineBlockType(block_stack: *std.ArrayList(*Block), line: []const u8) ?Bl
         return BlockType.CodeBlock;
     }
 
-    const prev_depth = switch (block_stack.getLast().blockType) {
+    const stack_top_type = block_stack.getLast().blockType;
+    const prev_depth = switch (stack_top_type) {
         .OrderedList, .OrderedListItem, .UnorderedList, .UnorderedListItem => |depth| depth,
         else => 0,
     };
 
+    // Check if we're currently in an unordered list context
+    const in_unordered_list = switch (stack_top_type) {
+        .UnorderedList, .UnorderedListItem => true,
+        else => false,
+    };
+
+    // Check if we're currently in an ordered list context
+    const in_ordered_list = switch (stack_top_type) {
+        .OrderedList, .OrderedListItem => true,
+        else => false,
+    };
+
     if (std.mem.eql(u8, first_word, "-")) {
-        //TODO: figure out depth
-        if (first_word_depth > prev_depth) {
+        // Create a new list if we're not in an unordered list, or if depth is greater
+        if (first_word_depth > prev_depth or !in_unordered_list) {
             return BlockType{ .UnorderedList = first_word_depth };
         } else if (first_word_depth == prev_depth) {
             return BlockType{ .UnorderedListItem = first_word_depth };
@@ -179,7 +194,8 @@ fn determineBlockType(block_stack: *std.ArrayList(*Block), line: []const u8) ?Bl
     }
 
     if (isOrderedNumber(first_word)) {
-        if (first_word_depth > prev_depth) {
+        // Create a new list if we're not in an ordered list, or if depth is greater
+        if (first_word_depth > prev_depth or !in_ordered_list) {
             return BlockType{ .OrderedList = first_word_depth };
         } else if (first_word_depth == prev_depth) {
             return BlockType{ .OrderedListItem = first_word_depth };
@@ -671,6 +687,11 @@ fn buildInlineChildren(allocator: Allocator, content: []const u8, segments: *std
 }
 
 pub fn parseInline(allocator: Allocator, current_block: *Block) !void {
+    // Skip inline parsing for code blocks - they should preserve raw content
+    if (current_block.blockType == .CodeBlock) {
+        return;
+    }
+
     if (current_block.blockType == .Paragraph or current_block.blockType == .Heading) {
         var stack: std.DoublyLinkedList = .{};
         var segments = std.ArrayList(InlineSegment).empty;
