@@ -65,8 +65,8 @@ pub const CEditSession = extern struct {
         }
 
         self.active_block_id = session.cursor.active_block_id;
-        self.text_ptr = session.text.ptr;
-        self.text_len = session.text.len;
+        self.text_ptr = session.editor.buffer.ptr;
+        self.text_len = session.editor.size;
 
         self.cursor_metrics = CCursorMetrics{
             .line_index = session.cursor.metrics.line_index,

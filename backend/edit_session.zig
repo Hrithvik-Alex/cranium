@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const unicode = std.unicode;
 
 const md_parser = @import("md_parser.zig");
-const gap_buffer = @import("gap_buffer.zig");
+const Editor = @import("Editor.zig");
 const font = @import("font.zig");
 
 const c = font.c;
@@ -25,9 +25,8 @@ pub const Cursor = struct {
 pub const EditSession = struct {
     session_arena: *std.heap.ArenaAllocator,
     ast_arena: *std.heap.ArenaAllocator,
-    gap: gap_buffer.GapBuffer,
+    editor: Editor,
     file_path: []const u8,
-    text: []const u8,
     line_info: []LineInfo,
     font: EditorFont,
     font_cache: FontCache,
@@ -176,11 +175,11 @@ fn lineIndexForCursor(line_info: []const LineInfo, cursor_byte: usize) usize {
 }
 
 fn updateActiveBlock(session: *EditSession) void {
-    if (session.text.len == 0) return;
-    if (session.cursor.byte_offset > session.text.len) {
-        session.cursor.byte_offset = session.text.len;
+    if (session.editor.size == 0) return;
+    if (session.cursor.byte_offset > session.editor.size) {
+        session.cursor.byte_offset = session.editor.size;
     }
-    const cursor_ptr = session.text.ptr + session.cursor.byte_offset;
+    const cursor_ptr = session.editor.buffer.ptr + session.cursor.byte_offset;
     if (session.root_block) |root| {
         var id_counter: usize = 1;
         if (findBlockAtCursor(root, cursor_ptr, &id_counter)) |result| {
@@ -192,7 +191,7 @@ fn updateActiveBlock(session: *EditSession) void {
 }
 
 fn updateCursorMetrics(session: *EditSession) void {
-    const text = session.text;
+    const text = session.editor.buffer[0..session.editor.size];
     const line_info = session.line_info;
     if (line_info.len == 0) return;
     if (session.cursor.byte_offset > text.len) {
@@ -234,13 +233,12 @@ pub fn reparse(session: *EditSession) !void {
     session.ast_arena.* = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 
     const allocator = session.ast_arena.allocator();
-    const text = try session.gap.toOwnedSlice(allocator);
+    const text = session.editor.buffer[0..session.editor.size];
 
     const block = try md_parser.parseBlocks(allocator, text);
     try md_parser.parseInline(allocator, block);
 
     session.root_block = block;
-    session.text = text;
     session.line_info = try computeLineInfo(allocator, text.ptr, text.len, session);
 
     updateActiveBlock(session);
@@ -271,15 +269,14 @@ pub fn create(filename: []const u8) !*EditSession {
     defer file.close();
     const file_contents = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
 
-    const gap = try gap_buffer.GapBuffer.initFromSlice(allocator, file_contents);
+    const editor = try Editor.create(allocator, file_contents);
 
     const session = try allocator.create(EditSession);
     session.* = EditSession{
         .session_arena = session_arena,
         .ast_arena = ast_arena,
-        .gap = gap,
+        .editor = editor,
         .file_path = file_path,
-        .text = &[_]u8{},
         .line_info = &[_]LineInfo{},
         .font = default_editor_font,
         .font_cache = FontCache.init(default_editor_font.size),
@@ -315,24 +312,24 @@ pub fn close(session: *EditSession) void {
 
 pub fn insertText(session: *EditSession, text: []const u8) !void {
     if (text.len == 0) return;
-    try session.gap.insert(session.cursor.byte_offset, text);
+    try session.editor.insert(session.session_arena.allocator(), session.cursor.byte_offset, text);
     session.cursor.byte_offset += text.len;
     try reparse(session);
 }
 
 pub fn deleteBackward(session: *EditSession) !void {
-    const prev = session.gap.prevCodepointStart(session.cursor.byte_offset);
+    const prev = @max(0, session.cursor.byte_offset - 1);
     if (prev < session.cursor.byte_offset) {
-        try session.gap.delete(prev, session.cursor.byte_offset - prev);
+        try session.editor.delete_range(prev, session.cursor.byte_offset);
         session.cursor.byte_offset = prev;
         try reparse(session);
     }
 }
 
 pub fn deleteForward(session: *EditSession) !void {
-    const next = session.gap.nextCodepointEnd(session.cursor.byte_offset);
+    const next = @min(session.editor.size, session.cursor.byte_offset + 1);
     if (next > session.cursor.byte_offset) {
-        try session.gap.delete(session.cursor.byte_offset, next - session.cursor.byte_offset);
+        try session.editor.delete_range(session.cursor.byte_offset, next);
         try reparse(session);
     }
 }
@@ -344,11 +341,11 @@ fn updateCursor(session: *EditSession, byte_pos: usize) void {
 }
 
 pub fn moveCursorLeft(session: *EditSession) void {
-    updateCursor(session, session.gap.prevCodepointStart(session.cursor.byte_offset));
+    updateCursor(session, @max(0, session.cursor.byte_offset - 1));
 }
 
 pub fn moveCursorRight(session: *EditSession) void {
-    updateCursor(session, session.gap.nextCodepointEnd(session.cursor.byte_offset));
+    updateCursor(session, @min(session.editor.size, session.cursor.byte_offset + 1));
 }
 
 pub fn moveCursorUp(session: *EditSession) void {
@@ -374,13 +371,12 @@ pub fn moveCursorDown(session: *EditSession) void {
 }
 
 pub fn setCursorOffset(session: *EditSession, offset: usize) void {
-    updateCursor(session, @min(offset, session.gap.len()));
+    updateCursor(session, @min(offset, session.editor.size));
 }
 
 pub fn saveFile(session: *EditSession) !void {
     const file = try std.fs.createFileAbsolute(session.file_path, .{ .truncate = true });
     defer file.close();
 
-    const text = try session.gap.toOwnedSlice(session.ast_arena.allocator());
-    try file.writeAll(text);
+    try file.writeAll(session.editor.buffer[0..session.editor.size]);
 }
