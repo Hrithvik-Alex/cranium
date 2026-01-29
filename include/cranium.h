@@ -58,6 +58,9 @@ typedef struct CBlock
      */
     size_t block_type_value;
 
+    /** Unique block id within a document */
+    size_t block_id;
+
     /**
      * String value associated with the block type (for Link/Image: the URL)
      * NULL for other block types
@@ -93,6 +96,35 @@ typedef struct CDocument
     void *arena_ptr;
 } CDocument;
 
+typedef struct CEditorFont
+{
+    const char *family_ptr;
+    size_t family_len;
+    float size;
+    float weight;
+    uint8_t is_monospaced;
+} CEditorFont;
+
+typedef struct CCursorMetrics
+{
+    size_t line_index;
+    size_t column_byte;
+    float caret_x;
+    float caret_y;
+    float line_height;
+} CCursorMetrics;
+
+typedef struct CEditSession
+{
+    CBlock *root_block;
+    size_t active_block_id;
+    CCursorMetrics cursor_metrics;
+    CEditorFont font;
+    const char *text_ptr;
+    size_t text_len;
+    void *session_ptr;
+} CEditSession;
+
 /**
  * Open and parse a markdown file, returning a document handle.
  *
@@ -119,5 +151,45 @@ void closeDocument(CDocument *doc);
  * @return 0 on success, -1 on error.
  */
 int createFile(const char *filename);
+
+/**
+ * Create an edit session with a gap buffer for a file.
+ *
+ * @param filename Null-terminated C string containing the absolute path to the markdown file.
+ * @return Pointer to a CEditSession handle on success, or NULL on error.
+ */
+CEditSession *createEditSession(const char *filename);
+
+/**
+ * Close an edit session and free all associated resources.
+ *
+ * @param session Pointer to the CEditSession to close. May be NULL (no-op).
+ */
+void closeEditSession(CEditSession *session);
+
+/**
+ * Handle text input (UTF-8).
+ *
+ * @param session Pointer to the CEditSession.
+ * @param text Null-terminated UTF-8 string to insert at cursor.
+ */
+void handleTextInput(CEditSession *session, const char *text);
+
+/**
+ * Handle non-text key events (arrows, delete, shortcuts).
+ *
+ * @param session Pointer to the CEditSession.
+ * @param key_code macOS virtual key code.
+ * @param modifiers NSEvent modifier flags bitmask.
+ */
+void handleKeyEvent(CEditSession *session, uint16_t key_code, uint64_t modifiers);
+
+/**
+ * Set the cursor position by byte offset in the UTF-8 text buffer.
+ *
+ * @param session Pointer to the CEditSession.
+ * @param byte_offset Byte offset in the document text.
+ */
+void setCursorByteOffset(CEditSession *session, size_t byte_offset);
 
 #endif /* CRANIUM_H */

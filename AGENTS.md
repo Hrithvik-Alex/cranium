@@ -85,12 +85,12 @@ Defined in `include/cranium.h` and mirrored in `md_file_interop.zig`:
 
 ## Backend Modules
 
-| Module | Purpose |
-|--------|---------|
-| `md_parser.zig` | Markdown parser that produces an AST of Block nodes |
-| `gap_buffer.zig` | Gap buffer data structure for efficient text editing |
+| Module                | Purpose                                               |
+| --------------------- | ----------------------------------------------------- |
+| `md_parser.zig`       | Markdown parser that produces an AST of Block nodes   |
+| `gap_buffer.zig`      | Gap buffer data structure for efficient text editing  |
 | `md_file_interop.zig` | C ABI layer exporting functions for Swift consumption |
-| `root.zig` | Module re-exports and test runner |
+| `root.zig`            | Module re-exports and test runner                     |
 
 ## Data Flow
 
@@ -127,6 +127,7 @@ zig build lib
 ```
 
 This produces:
+
 - `zig-out/lib/libcranium.a` (ARM64 for Apple Silicon)
 - `zig-out/lib/libcranium_x86_64.a` (Intel)
 - `zig-out/include/cranium.h`
@@ -179,6 +180,11 @@ cranium/
 ```
 
 ## Code Style Guidelines
+
+### General
+
+- If implementing new chunks of logic, be mindful about where that lives. If theres is enough standalone, it probably makes sense to create a new file for that rather than lump everything in the same file.
+- Dont repeat yourself. If there are big chunks of logic that are repeated line-by-line, create a function to consolidate them.
 
 ### Zig
 

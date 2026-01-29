@@ -1,5 +1,31 @@
 const std = @import("std");
 
+fn addMacFrameworkPaths(b: *std.Build, lib: *std.Build.Step.Compile) void {
+    if (lib.root_module.resolved_target.?.result.os.tag != .macos) return;
+
+    var sdk_path_opt: ?[]const u8 = null;
+    if (std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" },
+    }) catch null) |result| {
+        defer b.allocator.free(result.stdout);
+        defer b.allocator.free(result.stderr);
+        if (result.term.Exited == 0) {
+            const trimmed = std.mem.trimRight(u8, result.stdout, "\r\n");
+            sdk_path_opt = b.allocator.dupe(u8, trimmed) catch null;
+        }
+    }
+
+    if (sdk_path_opt) |sdk| {
+        defer b.allocator.free(sdk);
+        const framework_path = b.pathJoin(&.{ sdk, "System/Library/Frameworks" });
+        lib.addSystemFrameworkPath(.{ .cwd_relative = framework_path });
+    }
+
+    lib.addSystemFrameworkPath(.{ .cwd_relative = "/System/Library/Frameworks" });
+    lib.addSystemFrameworkPath(.{ .cwd_relative = "/Library/Frameworks" });
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -49,6 +75,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    addMacFrameworkPaths(b, lib_aarch64);
+    lib_aarch64.linkFramework("CoreText");
+    lib_aarch64.linkFramework("CoreGraphics");
+    lib_aarch64.linkFramework("CoreFoundation");
 
     // x86_64 (Intel) static library
     const lib_x86_64 = b.addLibrary(.{
@@ -60,6 +90,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    addMacFrameworkPaths(b, lib_x86_64);
+    lib_x86_64.linkFramework("CoreText");
+    lib_x86_64.linkFramework("CoreGraphics");
+    lib_x86_64.linkFramework("CoreFoundation");
 
     // Install both libraries
     const install_lib_aarch64 = b.addInstallArtifact(lib_aarch64, .{});
