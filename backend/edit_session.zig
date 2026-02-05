@@ -56,6 +56,7 @@ const BlockSearchResult = struct {
     id: usize,
 };
 
+// TODO: add information to the md parser so that this is easier, like a map from line -> block or something
 /// Find block containing cursor position, returning both the block and its ID
 fn findBlockAtCursor(block: *Block, cursor_ptr: [*]const u8, id_counter: *usize) ?BlockSearchResult {
     const current_id = id_counter.*;
