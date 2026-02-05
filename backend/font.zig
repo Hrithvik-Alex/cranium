@@ -92,7 +92,6 @@ pub const FontCache = struct {
     }
 
     fn createCTFont(font: EditorFont, size: f32) c.CTFontRef {
-        c.CTFontCreatePathForGlyph(font: ?*const struct___CTFont, glyph: c_ushort, matrix: [*c]const struct_CGAffineTransform)
         const cf_family = createCFString(font.family);
         defer c.CFRelease(cf_family);
         return c.CTFontCreateWithName(cf_family, size, null);

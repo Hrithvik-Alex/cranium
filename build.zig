@@ -79,6 +79,8 @@ pub fn build(b: *std.Build) void {
     lib_aarch64.linkFramework("CoreText");
     lib_aarch64.linkFramework("CoreGraphics");
     lib_aarch64.linkFramework("CoreFoundation");
+    lib_aarch64.linkFramework("Metal");
+    lib_aarch64.linkFramework("QuartzCore");
 
     // x86_64 (Intel) static library
     const lib_x86_64 = b.addLibrary(.{
@@ -94,6 +96,8 @@ pub fn build(b: *std.Build) void {
     lib_x86_64.linkFramework("CoreText");
     lib_x86_64.linkFramework("CoreGraphics");
     lib_x86_64.linkFramework("CoreFoundation");
+    lib_x86_64.linkFramework("Metal");
+    lib_x86_64.linkFramework("QuartzCore");
 
     // Install both libraries
     const install_lib_aarch64 = b.addInstallArtifact(lib_aarch64, .{});

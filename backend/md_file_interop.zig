@@ -5,6 +5,11 @@ const md_parser = @import("md_parser.zig");
 const font = @import("font.zig");
 const edit_session = @import("edit_session.zig");
 
+// Import metal module to ensure its export fn symbols are included in the static library
+comptime {
+    _ = @import("metal.zig");
+}
+
 const EditSession = edit_session.EditSession;
 
 pub const Block = md_parser.Block;

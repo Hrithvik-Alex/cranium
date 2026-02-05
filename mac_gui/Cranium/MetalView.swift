@@ -1,27 +1,44 @@
 import SwiftUI
 import MetalKit
 
-/// Renders an MTKView with the given renderer class.
-struct MetalView<V: MTKView>: View {
-    @State private var metalView = V()
-
-    var body: some View {
-        MetalViewRepresentable(metalView: $metalView)
-    }
-}
-
-fileprivate struct MetalViewRepresentable<V: MTKView>: NSViewRepresentable {
-    @Binding var metalView: V
-
-    func makeNSView(context: Context) -> some NSView {
-        metalView
+/// SwiftUI wrapper around MTKView that delegates rendering to the Zig Metal backend.
+struct MetalSurfaceView: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
     }
 
-    func updateNSView(_ view: NSViewType, context: Context) {
-        updateMetalView()
+    func makeNSView(context: Context) -> MTKView {
+        let view = MTKView()
+        view.enableSetNeedsDisplay = false
+        view.isPaused = false
+        view.preferredFramesPerSecond = 60
+
+        // Initialize the Zig Metal renderer, passing the MTKView pointer.
+        // surface_init creates the MTLDevice, command queue, and pipeline,
+        // and configures the view.
+        let viewPtr = Unmanaged.passUnretained(view).toOpaque()
+        context.coordinator.renderer = surface_init(viewPtr)
+
+        view.delegate = context.coordinator
+        return view
     }
 
-    func updateMetalView() {
-        
+    func updateNSView(_ nsView: MTKView, context: Context) {}
+
+    class Coordinator: NSObject, MTKViewDelegate {
+        var renderer: UnsafeMutableRawPointer?
+
+        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+        func draw(in view: MTKView) {
+            guard let renderer = renderer else { return }
+            render_frame(renderer)
+        }
+
+        deinit {
+            if let renderer = renderer {
+                surface_deinit(renderer)
+            }
+        }
     }
 }

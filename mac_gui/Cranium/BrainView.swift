@@ -19,15 +19,16 @@ struct BrainView: View {
                 .navigationTitle("Files")
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 320)
         } detail: {
-            if let file = vaultManager.currentFile {
-                FileView(fileName: file, baseDirectory: selectedFolderPath)
-            } else {
-                ContentUnavailableView(
-                    "No File Selected",
-                    systemImage: "doc.text",
-                    description: Text("Select a file from the sidebar to view its contents")
-                )
-            }
+            // if let file = vaultManager.currentFile {
+            //     FileView(fileName: file, baseDirectory: selectedFolderPath)
+            // } else {
+            //     ContentUnavailableView(
+            //         "No File Selected",
+            //         systemImage: "doc.text",
+            //         description: Text("Select a file from the sidebar to view its contents")
+            //     )
+            // }
+            MetalSurfaceView()
         }
         .environment(vaultManager)
     }

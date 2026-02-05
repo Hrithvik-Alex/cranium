@@ -192,4 +192,32 @@ void handleKeyEvent(CEditSession *session, uint16_t key_code, uint64_t modifiers
  */
 void setCursorByteOffset(CEditSession *session, size_t byte_offset);
 
+// ============================================================================
+// Metal Renderer
+// ============================================================================
+
+/**
+ * Initialize the Metal renderer.
+ *
+ * @param mtk_view Pointer to an MTKView instance (passed as void* from Swift).
+ *                 The renderer creates the MTLDevice and configures the view.
+ * @return Opaque renderer handle on success, or NULL on failure.
+ *         The caller must call surface_deinit() to free resources.
+ */
+void *surface_init(void *mtk_view);
+
+/**
+ * Render a frame (currently draws a colored triangle).
+ *
+ * @param renderer Opaque renderer handle from surface_init().
+ */
+void render_frame(void *renderer);
+
+/**
+ * Destroy the Metal renderer and release all Metal resources.
+ *
+ * @param renderer Opaque renderer handle from surface_init(). May be NULL (no-op).
+ */
+void surface_deinit(void *renderer);
+
 #endif /* CRANIUM_H */
