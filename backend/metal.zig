@@ -31,32 +31,18 @@ inline fn sel_(comptime name: [*:0]const u8) SEL {
     return sel_registerName(name);
 }
 
-/// Send a message with 0 extra arguments
-inline fn msgSend(comptime RetT: type, target: Id, selector: SEL) RetT {
-    const FnT = *const fn (Id, SEL) callconv(.c) RetT;
-    const f: FnT = @ptrFromInt(@intFromPtr(&objc_msgSend));
-    return f(target, selector);
-}
+/// Send an ObjC message. Args is a tuple of extra arguments (use .{} for none).
+inline fn msgSend(comptime RetT: type, target: Id, selector: SEL, args: anytype) RetT {
+    const fields = @typeInfo(@TypeOf(args)).@"struct".fields;
+    const addr = @intFromPtr(&objc_msgSend);
 
-/// Send a message with 1 extra argument
-inline fn msgSend1(comptime RetT: type, target: Id, selector: SEL, a1: anytype) RetT {
-    const FnT = *const fn (Id, SEL, @TypeOf(a1)) callconv(.c) RetT;
-    const f: FnT = @ptrFromInt(@intFromPtr(&objc_msgSend));
-    return f(target, selector, a1);
-}
-
-/// Send a message with 2 extra arguments
-inline fn msgSend2(comptime RetT: type, target: Id, selector: SEL, a1: anytype, a2: anytype) RetT {
-    const FnT = *const fn (Id, SEL, @TypeOf(a1), @TypeOf(a2)) callconv(.c) RetT;
-    const f: FnT = @ptrFromInt(@intFromPtr(&objc_msgSend));
-    return f(target, selector, a1, a2);
-}
-
-/// Send a message with 3 extra arguments
-inline fn msgSend3(comptime RetT: type, target: Id, selector: SEL, a1: anytype, a2: anytype, a3: anytype) RetT {
-    const FnT = *const fn (Id, SEL, @TypeOf(a1), @TypeOf(a2), @TypeOf(a3)) callconv(.c) RetT;
-    const f: FnT = @ptrFromInt(@intFromPtr(&objc_msgSend));
-    return f(target, selector, a1, a2, a3);
+    return switch (fields.len) {
+        0 => @as(*const fn (Id, SEL) callconv(.c) RetT, @ptrFromInt(addr))(target, selector),
+        1 => @as(*const fn (Id, SEL, fields[0].type) callconv(.c) RetT, @ptrFromInt(addr))(target, selector, args[0]),
+        2 => @as(*const fn (Id, SEL, fields[0].type, fields[1].type) callconv(.c) RetT, @ptrFromInt(addr))(target, selector, args[0], args[1]),
+        3 => @as(*const fn (Id, SEL, fields[0].type, fields[1].type, fields[2].type) callconv(.c) RetT, @ptrFromInt(addr))(target, selector, args[0], args[1], args[2]),
+        else => @compileError("msgSend supports up to 3 extra arguments"),
+    };
 }
 
 // ============================================================================
@@ -65,12 +51,12 @@ inline fn msgSend3(comptime RetT: type, target: Id, selector: SEL, a1: anytype, 
 
 fn createNSString(str: [*:0]const u8) OptId {
     const NSString = objc_getClass("NSString") orelse return null;
-    const alloc_obj = msgSend(OptId, NSString, sel_("alloc")) orelse return null;
-    return msgSend1(OptId, alloc_obj, sel_("initWithUTF8String:"), str);
+    const alloc_obj = msgSend(OptId, NSString, sel_("alloc"), .{}) orelse return null;
+    return msgSend(OptId, alloc_obj, sel_("initWithUTF8String:"), .{str});
 }
 
 fn release(obj: Id) void {
-    msgSend(void, obj, sel_("release"));
+    msgSend(void, obj, sel_("release"), .{});
 }
 
 // ============================================================================
@@ -81,31 +67,10 @@ const MTLPixelFormatBGRA8Unorm: c_ulong = 80;
 const MTLPrimitiveTypeTriangle: c_ulong = 3;
 
 // ============================================================================
-// MSL Shader Source
+// MSL Shader Source (embedded at compile time from .metal file)
 // ============================================================================
 
-const shader_source: [*:0]const u8 =
-    \\#include <metal_stdlib>
-    \\using namespace metal;
-    \\
-    \\struct VertexOut {
-    \\    float4 position [[position]];
-    \\    float4 color;
-    \\};
-    \\
-    \\vertex VertexOut vertex_main(uint vid [[vertex_id]],
-    \\                              constant float2 *positions [[buffer(0)]],
-    \\                              constant float4 *colors [[buffer(1)]]) {
-    \\    VertexOut out;
-    \\    out.position = float4(positions[vid], 0.0, 1.0);
-    \\    out.color = colors[vid];
-    \\    return out;
-    \\}
-    \\
-    \\fragment float4 fragment_main(VertexOut in [[stage_in]]) {
-    \\    return in.color;
-    \\}
-;
+const shader_source: [*:0]const u8 = @embedFile("shaders/triangle.metal");
 
 // ============================================================================
 // Triangle Vertex Data
@@ -139,61 +104,55 @@ fn initImpl(view: Id) !*Renderer {
     const device = MTLCreateSystemDefaultDevice() orelse return error.NoMetalDevice;
 
     // 2. Configure the MTKView
-    msgSend1(void, view, sel_("setDevice:"), device);
-    msgSend1(void, view, sel_("setColorPixelFormat:"), MTLPixelFormatBGRA8Unorm);
+    msgSend(void, view, sel_("setDevice:"), .{device});
+    msgSend(void, view, sel_("setColorPixelFormat:"), .{MTLPixelFormatBGRA8Unorm});
 
     // 3. Create command queue
-    const queue = msgSend(OptId, device, sel_("newCommandQueue")) orelse return error.NoCommandQueue;
+    const queue = msgSend(OptId, device, sel_("newCommandQueue"), .{}) orelse return error.NoCommandQueue;
 
     // 4. Compile shaders from source string
     const source_str = createNSString(shader_source) orelse return error.NSStringFailed;
     defer release(source_str);
 
     var compile_error: OptId = null;
-    const library = msgSend3(
-        OptId,
-        device,
-        sel_("newLibraryWithSource:options:error:"),
+    const library = msgSend(OptId, device, sel_("newLibraryWithSource:options:error:"), .{
         source_str,
         @as(OptId, null),
         &compile_error,
-    ) orelse return error.ShaderCompileFailed;
+    }) orelse return error.ShaderCompileFailed;
     defer release(library);
 
     // 5. Get vertex and fragment functions
     const vert_name = createNSString("vertex_main") orelse return error.NSStringFailed;
     defer release(vert_name);
-    const vert_fn = msgSend1(OptId, library, sel_("newFunctionWithName:"), vert_name) orelse return error.FunctionNotFound;
+    const vert_fn = msgSend(OptId, library, sel_("newFunctionWithName:"), .{vert_name}) orelse return error.FunctionNotFound;
     defer release(vert_fn);
 
     const frag_name = createNSString("fragment_main") orelse return error.NSStringFailed;
     defer release(frag_name);
-    const frag_fn = msgSend1(OptId, library, sel_("newFunctionWithName:"), frag_name) orelse return error.FunctionNotFound;
+    const frag_fn = msgSend(OptId, library, sel_("newFunctionWithName:"), .{frag_name}) orelse return error.FunctionNotFound;
     defer release(frag_fn);
 
     // 6. Create render pipeline descriptor
     const RPDClass = objc_getClass("MTLRenderPipelineDescriptor") orelse return error.ClassNotFound;
-    const rpd_alloc = msgSend(OptId, RPDClass, sel_("alloc")) orelse return error.AllocFailed;
-    const rpd = msgSend(OptId, rpd_alloc, sel_("init")) orelse return error.InitFailed;
+    const rpd_alloc = msgSend(OptId, RPDClass, sel_("alloc"), .{}) orelse return error.AllocFailed;
+    const rpd = msgSend(OptId, rpd_alloc, sel_("init"), .{}) orelse return error.InitFailed;
     defer release(rpd);
 
-    msgSend1(void, rpd, sel_("setVertexFunction:"), vert_fn);
-    msgSend1(void, rpd, sel_("setFragmentFunction:"), frag_fn);
+    msgSend(void, rpd, sel_("setVertexFunction:"), .{vert_fn});
+    msgSend(void, rpd, sel_("setFragmentFunction:"), .{frag_fn});
 
     // Set pixel format on color attachment 0
-    const attachments = msgSend(OptId, rpd, sel_("colorAttachments")) orelse return error.NoAttachments;
-    const attachment0 = msgSend1(OptId, attachments, sel_("objectAtIndexedSubscript:"), @as(c_ulong, 0)) orelse return error.NoAttachment;
-    msgSend1(void, attachment0, sel_("setPixelFormat:"), MTLPixelFormatBGRA8Unorm);
+    const attachments = msgSend(OptId, rpd, sel_("colorAttachments"), .{}) orelse return error.NoAttachments;
+    const attachment0 = msgSend(OptId, attachments, sel_("objectAtIndexedSubscript:"), .{@as(c_ulong, 0)}) orelse return error.NoAttachment;
+    msgSend(void, attachment0, sel_("setPixelFormat:"), .{MTLPixelFormatBGRA8Unorm});
 
     // 7. Create pipeline state
     var pipeline_error: OptId = null;
-    const pipeline_state = msgSend2(
-        OptId,
-        device,
-        sel_("newRenderPipelineStateWithDescriptor:error:"),
+    const pipeline_state = msgSend(OptId, device, sel_("newRenderPipelineStateWithDescriptor:error:"), .{
         rpd,
         &pipeline_error,
-    ) orelse return error.PipelineFailed;
+    }) orelse return error.PipelineFailed;
 
     // 8. Allocate and return renderer
     const renderer = try std.heap.page_allocator.create(Renderer);
@@ -212,52 +171,43 @@ fn renderImpl(renderer: *Renderer) void {
     defer objc_autoreleasePoolPop(pool);
 
     // Get current render pass descriptor and drawable from MTKView
-    const rpd = msgSend(OptId, renderer.view, sel_("currentRenderPassDescriptor")) orelse return;
-    const drawable = msgSend(OptId, renderer.view, sel_("currentDrawable")) orelse return;
+    const rpd = msgSend(OptId, renderer.view, sel_("currentRenderPassDescriptor"), .{}) orelse return;
+    const drawable = msgSend(OptId, renderer.view, sel_("currentDrawable"), .{}) orelse return;
 
     // Create command buffer
-    const cmd_buffer = msgSend(OptId, renderer.command_queue, sel_("commandBuffer")) orelse return;
+    const cmd_buffer = msgSend(OptId, renderer.command_queue, sel_("commandBuffer"), .{}) orelse return;
 
     // Create render command encoder
-    const encoder = msgSend1(OptId, cmd_buffer, sel_("renderCommandEncoderWithDescriptor:"), rpd) orelse return;
+    const encoder = msgSend(OptId, cmd_buffer, sel_("renderCommandEncoderWithDescriptor:"), .{rpd}) orelse return;
 
     // Set pipeline state
-    msgSend1(void, encoder, sel_("setRenderPipelineState:"), renderer.pipeline_state);
+    msgSend(void, encoder, sel_("setRenderPipelineState:"), .{renderer.pipeline_state});
 
     // Set vertex data (positions at buffer index 0, colors at buffer index 1)
-    msgSend3(
-        void,
-        encoder,
-        sel_("setVertexBytes:length:atIndex:"),
+    msgSend(void, encoder, sel_("setVertexBytes:length:atIndex:"), .{
         @as(*const anyopaque, @ptrCast(&positions)),
         @as(c_ulong, @sizeOf(@TypeOf(positions))),
         @as(c_ulong, 0),
-    );
-    msgSend3(
-        void,
-        encoder,
-        sel_("setVertexBytes:length:atIndex:"),
+    });
+    msgSend(void, encoder, sel_("setVertexBytes:length:atIndex:"), .{
         @as(*const anyopaque, @ptrCast(&colors)),
         @as(c_ulong, @sizeOf(@TypeOf(colors))),
         @as(c_ulong, 1),
-    );
+    });
 
     // Draw triangle
-    msgSend3(
-        void,
-        encoder,
-        sel_("drawPrimitives:vertexStart:vertexCount:"),
+    msgSend(void, encoder, sel_("drawPrimitives:vertexStart:vertexCount:"), .{
         MTLPrimitiveTypeTriangle,
         @as(c_ulong, 0),
         @as(c_ulong, 3),
-    );
+    });
 
     // End encoding
-    msgSend(void, encoder, sel_("endEncoding"));
+    msgSend(void, encoder, sel_("endEncoding"), .{});
 
     // Present drawable and commit
-    msgSend1(void, cmd_buffer, sel_("presentDrawable:"), drawable);
-    msgSend(void, cmd_buffer, sel_("commit"));
+    msgSend(void, cmd_buffer, sel_("presentDrawable:"), .{drawable});
+    msgSend(void, cmd_buffer, sel_("commit"), .{});
 }
 
 fn deinitImpl(renderer: *Renderer) void {
