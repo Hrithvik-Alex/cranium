@@ -105,6 +105,8 @@ fn computeLineInfo(
     text_len: usize,
     session: *EditSession,
 ) ![]LineInfo {
+    if (text_len == 0) return &.{};
+
     var line_count: usize = 1;
     for (text_ptr[0..text_len]) |ch| {
         if (ch == '\n') line_count += 1;
@@ -302,13 +304,18 @@ pub fn create(filename: []const u8) !*EditSession {
 pub fn close(session: *EditSession) void {
     releaseLineInfo(session.line_info);
     session.font_cache.deinit(); // Release external CoreText resources
-    session.ast_arena.deinit();
 
     const page_alloc = std.heap.page_allocator;
-    page_alloc.destroy(session.ast_arena);
 
-    session.session_arena.deinit();
-    page_alloc.destroy(session.session_arena);
+    session.ast_arena.deinit();
+    const ast_arena = session.ast_arena;
+
+    // session_arena owns `session` itself, so copy the pointer before deinit
+    const session_arena = session.session_arena;
+    session_arena.deinit();
+
+    page_alloc.destroy(ast_arena);
+    page_alloc.destroy(session_arena);
 }
 
 pub fn insertText(session: *EditSession, text: []const u8) !void {

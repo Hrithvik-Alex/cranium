@@ -355,8 +355,6 @@ struct FileView: View {
     var fileName: String
     var baseDirectory: String
     @State private var viewModel = FileViewModel()
-    @State private var scrollOffsetY: CGFloat = 0
-    private let editorPadding: CGFloat = 16
 
     var body: some View {
         VStack {
@@ -366,37 +364,10 @@ struct FileView: View {
 
             Spacer()
             
-            if let doc = viewModel.documentBlock {
+            if viewModel.hasDocument {
                 ZStack(alignment: .topLeading) {
-                    ScrollView {
-                        BlockTreeView(
-                            block: doc,
-                            depth: 0,
-                            activeBlockId: viewModel.activeBlockId,
-                            editorFont: viewModel.editorFont
-                        )
-                        .padding(editorPadding)
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear.preference(
-                                    key: ScrollOffsetPreferenceKey.self,
-                                    value: -proxy.frame(in: .named("editorScroll")).minY
-                                )
-                            }
-                        )
+                    MetalSurfaceView(text: viewModel.currentText)
                         .id(viewModel.revision)
-                    }
-                    .coordinateSpace(name: "editorScroll")
-                    .onPreferenceChange(ScrollOffsetPreferenceKey.self) { scrollOffsetY in
-                        self.scrollOffsetY = scrollOffsetY
-                    }
-
-                    if let cursor = viewModel.cursorMetrics {
-                        CursorView(cursor: cursor)
-                            .allowsHitTesting(false)
-                            .offset(x: editorPadding, y: editorPadding - scrollOffsetY)
-                            .id(viewModel.revision)
-                    }
 
                     EditorInputView(
                         font: viewModel.editorFont,
@@ -482,14 +453,6 @@ struct FileView: View {
         let utf8Index = stringIndex.samePosition(in: text.utf8) ?? text.utf8.endIndex
         let byteOffset = text.utf8.distance(from: text.utf8.startIndex, to: utf8Index)
         viewModel.sendCursorByteOffset(byteOffset)
-    }
-}
-
-private struct ScrollOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
 

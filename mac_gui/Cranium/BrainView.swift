@@ -12,7 +12,6 @@ struct BrainView: View {
     var selectedFolderPath: String
     @State private var vaultManager: VaultManager = VaultManager()
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
-    @State private var displayText: String = "Hello, World!"
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -20,11 +19,16 @@ struct BrainView: View {
                 .navigationTitle("Files")
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 320)
         } detail: {
-            VStack {
-                MetalSurfaceView(text: displayText)
-                TextField("Type here...", text: $displayText)
-                    .textFieldStyle(.roundedBorder)
-                    .padding()
+            if let currentFile = vaultManager.currentFile {
+                FileView(fileName: currentFile, baseDirectory: selectedFolderPath)
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "doc.text")
+                        .font(.largeTitle)
+                        .foregroundColor(.secondary)
+                    Text("Select a file to start editing")
+                        .foregroundColor(.secondary)
+                }
             }
         }
         .environment(vaultManager)
