@@ -17,6 +17,7 @@ const c = @cImport({
 const ASCII_START: u21 = 32;
 const ASCII_END: u21 = 126;
 pub const NUM_CHARS: usize = ASCII_END - ASCII_START + 1;
+pub const GLYPH_PAD: f32 = 2.0;
 
 // ============================================================================
 // Types
@@ -38,6 +39,8 @@ pub const GlyphAtlas = struct {
     height: u32,
     // TODO: probably make this a heap variable without this constraint in the future.
     glyph_info: [NUM_CHARS]GlyphInfo,
+    line_height: f32,
+    ascent: f32,
 
     pub fn deinit(self: *GlyphAtlas, allocator: Allocator) void {
         allocator.free(self.pixels);
@@ -85,6 +88,12 @@ fn createCTFont(ttf_data: []const u8, font_size: f64) !c.CTFontRef {
 // ============================================================================
 
 fn rasterize_atlas_with_font(allocator: Allocator, font_ref: c.CTFontRef) !GlyphAtlas {
+    // 0. Get font metrics for line layout
+    const ascent: f32 = @floatCast(c.CTFontGetAscent(font_ref));
+    const descent: f32 = @floatCast(c.CTFontGetDescent(font_ref));
+    const leading: f32 = @floatCast(c.CTFontGetLeading(font_ref));
+    const line_height = ascent + descent + leading;
+
     // 1. Map all printable ASCII codepoints to glyph IDs
     var chars: [NUM_CHARS]c.UniChar = undefined;
     var glyph_ids: [NUM_CHARS]c.CGGlyph = undefined;
@@ -230,5 +239,7 @@ fn rasterize_atlas_with_font(allocator: Allocator, font_ref: c.CTFontRef) !Glyph
         .width = atlas_width,
         .height = atlas_height,
         .glyph_info = glyph_info,
+        .line_height = line_height,
+        .ascent = ascent,
     };
 }

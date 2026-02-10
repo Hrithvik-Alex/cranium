@@ -116,6 +116,9 @@ const Vertex = extern struct {
     texcoord: [2]f32,
 };
 
+const INITIAL_TEXT_CAPACITY = 1024;
+const VERTICES_PER_CHAR = 6;
+
 // ============================================================================
 // Renderer
 // ============================================================================
@@ -127,8 +130,29 @@ const Renderer = struct {
     view: Id,
     texture: Id,
     sampler: Id,
-    vertices: [6]Vertex,
-    atlas_info: FontLoader.GlyphAtlas,
+    vertex_buffer: Id,
+    vertex_char_capacity: usize,
+    atlas: FontLoader.GlyphAtlas,
+
+    fn ensureVertexCapacity(self: *Renderer, required_chars: usize) bool {
+        if (required_chars <= self.vertex_char_capacity) return true;
+
+        var new_capacity = self.vertex_char_capacity;
+        while (new_capacity < required_chars) {
+            new_capacity *= 2;
+        }
+
+        const new_size = new_capacity * VERTICES_PER_CHAR * @sizeOf(Vertex);
+        const new_buffer = msgSend(OptId, self.device, sel_("newBufferWithLength:options:"), .{
+            @as(c_ulong, new_size),
+            @as(c_ulong, 0),
+        }) orelse return false;
+
+        release(self.vertex_buffer);
+        self.vertex_buffer = new_buffer;
+        self.vertex_char_capacity = new_capacity;
+        return true;
+    }
 };
 
 fn initImpl(view: Id) !*Renderer {
@@ -142,10 +166,10 @@ fn initImpl(view: Id) !*Renderer {
     // 3. Create command queue
     const queue = msgSend(OptId, device, sel_("newCommandQueue"), .{}) orelse return error.NoCommandQueue;
 
-    // 4. Rasterize glyph atlas (all printable ASCII at 96pt)
+    // 4. Rasterize glyph atlas (all printable ASCII at 48pt)
     var atlas = FontLoader.rasterize_atlas(
         std.heap.page_allocator,
-        96.0,
+        48.0,
         font_data,
     ) catch return error.GlyphRasterFailed;
 
@@ -172,7 +196,7 @@ fn initImpl(view: Id) !*Renderer {
         @as(c_ulong, atlas.width),
     });
 
-    // Free the pixel data (already uploaded to GPU), keep glyph_info
+    // Free pixel data (already on GPU), keep glyph_info
     std.heap.page_allocator.free(atlas.pixels);
     atlas.pixels = &.{};
 
@@ -236,30 +260,12 @@ fn initImpl(view: Id) !*Renderer {
         &pipeline_error,
     }) orelse return error.PipelineFailed;
 
-    // 11. Compute quad vertices for 'A' from atlas
-    const glyph = atlas.getGlyphInfo('A') orelse return error.GlyphNotFound;
-    const aw: f32 = @floatFromInt(atlas.width);
-    const ah: f32 = @floatFromInt(atlas.height);
-    const uv_left: f32 = @as(f32, @floatFromInt(glyph.atlas_x)) / aw;
-    const uv_top: f32 = @as(f32, @floatFromInt(glyph.atlas_y)) / ah;
-    const uv_right: f32 = @as(f32, @floatFromInt(glyph.atlas_x + glyph.width)) / aw;
-    const uv_bottom: f32 = @as(f32, @floatFromInt(glyph.atlas_y + glyph.height)) / ah;
-
-    const gw: f32 = @floatFromInt(glyph.width);
-    const gh: f32 = @floatFromInt(glyph.height);
-    const aspect = gw / gh;
-
-    const half_h: f32 = 0.5;
-    const half_w: f32 = half_h * aspect;
-
-    const vertices = [6]Vertex{
-        .{ .position = .{ -half_w, half_h }, .texcoord = .{ uv_left, uv_top } },
-        .{ .position = .{ -half_w, -half_h }, .texcoord = .{ uv_left, uv_bottom } },
-        .{ .position = .{ half_w, -half_h }, .texcoord = .{ uv_right, uv_bottom } },
-        .{ .position = .{ -half_w, half_h }, .texcoord = .{ uv_left, uv_top } },
-        .{ .position = .{ half_w, -half_h }, .texcoord = .{ uv_right, uv_bottom } },
-        .{ .position = .{ half_w, half_h }, .texcoord = .{ uv_right, uv_top } },
-    };
+    // 11. Create persistent vertex buffer
+    const initial_buf_size = INITIAL_TEXT_CAPACITY * VERTICES_PER_CHAR * @sizeOf(Vertex);
+    const vertex_buffer = msgSend(OptId, device, sel_("newBufferWithLength:options:"), .{
+        @as(c_ulong, initial_buf_size),
+        @as(c_ulong, 0), // MTLResourceStorageModeShared
+    }) orelse return error.BufferFailed;
 
     // 12. Allocate and return renderer
     const renderer = try std.heap.page_allocator.create(Renderer);
@@ -270,16 +276,128 @@ fn initImpl(view: Id) !*Renderer {
         .view = view,
         .texture = texture,
         .sampler = sampler,
-        .vertices = vertices,
-        .atlas_info = atlas,
+        .vertex_buffer = vertex_buffer,
+        .vertex_char_capacity = INITIAL_TEXT_CAPACITY,
+        .atlas = atlas,
     };
 
     return renderer;
 }
 
-fn renderImpl(renderer: *Renderer) void {
+fn renderImpl(renderer: *Renderer, text: []const u8, view_width: f32, view_height: f32) void {
+    if (text.len == 0 or view_width <= 0 or view_height <= 0) return;
+
     const pool = objc_autoreleasePoolPush() orelse return;
     defer objc_autoreleasePoolPop(pool);
+
+    // Ensure vertex buffer is large enough for the text
+    if (!renderer.ensureVertexCapacity(text.len)) return;
+
+    const max_vertices = renderer.vertex_char_capacity * VERTICES_PER_CHAR;
+
+    // Build vertex data for the text string
+    const buf_ptr = msgSend(*anyopaque, renderer.vertex_buffer, sel_("contents"), .{});
+    const vertices: [*]Vertex = @ptrCast(@alignCast(buf_ptr));
+
+    const aw: f32 = @floatFromInt(renderer.atlas.width);
+    const ah: f32 = @floatFromInt(renderer.atlas.height);
+    const pad = FontLoader.GLYPH_PAD;
+
+    const margin: f32 = 20.0;
+    const max_x: f32 = view_width - margin;
+    var cursor_x: f32 = margin;
+    var baseline_y: f32 = margin + renderer.atlas.ascent;
+    var vertex_count: usize = 0;
+
+    var i: usize = 0;
+    while (i < text.len) {
+        // Handle newlines
+        if (text[i] == '\n') {
+            cursor_x = margin;
+            baseline_y += renderer.atlas.line_height;
+            i += 1;
+            continue;
+        }
+
+        // Handle spaces
+        if (text[i] == ' ') {
+            if (renderer.atlas.getGlyphInfo(' ')) |g| {
+                cursor_x += g.advance;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Find word boundary
+        const word_start = i;
+        while (i < text.len and text[i] != ' ' and text[i] != '\n') : (i += 1) {}
+        const word = text[word_start..i];
+
+        // Measure word width
+        var word_width: f32 = 0;
+        for (word) |ch| {
+            if (renderer.atlas.getGlyphInfo(@intCast(ch))) |g| {
+                word_width += g.advance;
+            }
+        }
+
+        // Word wrap: if word doesn't fit and we're not at line start, move to next line
+        if (cursor_x + word_width > max_x and cursor_x > margin + 0.1) {
+            cursor_x = margin;
+            baseline_y += renderer.atlas.line_height;
+        }
+
+        // Render word character by character (handles char-wrap for long words)
+        for (word) |ch| {
+            const glyph = renderer.atlas.getGlyphInfo(@intCast(ch)) orelse continue;
+
+            // Character wrap: if this char overflows and we're not at line start
+            if (cursor_x + glyph.advance > max_x and cursor_x > margin + 0.1) {
+                cursor_x = margin;
+                baseline_y += renderer.atlas.line_height;
+            }
+
+            if (glyph.width == 0 or glyph.height == 0) {
+                cursor_x += glyph.advance;
+                continue;
+            }
+
+            if (vertex_count + 6 > max_vertices) break;
+
+            const gw: f32 = @floatFromInt(glyph.width);
+            const gh: f32 = @floatFromInt(glyph.height);
+
+            // Screen-space quad (pixels, y-down from top-left)
+            const quad_left = cursor_x + glyph.bearing_x - pad;
+            const quad_top = baseline_y - glyph.bearing_y - gh + pad;
+            const quad_right = quad_left + gw;
+            const quad_bottom = quad_top + gh;
+
+            // Convert pixel coords to NDC
+            const ndc_l = quad_left / view_width * 2.0 - 1.0;
+            const ndc_r = quad_right / view_width * 2.0 - 1.0;
+            const ndc_t = 1.0 - quad_top / view_height * 2.0;
+            const ndc_b = 1.0 - quad_bottom / view_height * 2.0;
+
+            // UV coordinates in atlas
+            const uv_l: f32 = @as(f32, @floatFromInt(glyph.atlas_x)) / aw;
+            const uv_t: f32 = @as(f32, @floatFromInt(glyph.atlas_y)) / ah;
+            const uv_r: f32 = @as(f32, @floatFromInt(glyph.atlas_x + glyph.width)) / aw;
+            const uv_b: f32 = @as(f32, @floatFromInt(glyph.atlas_y + glyph.height)) / ah;
+
+            vertices[vertex_count + 0] = .{ .position = .{ ndc_l, ndc_t }, .texcoord = .{ uv_l, uv_t } };
+            vertices[vertex_count + 1] = .{ .position = .{ ndc_l, ndc_b }, .texcoord = .{ uv_l, uv_b } };
+            vertices[vertex_count + 2] = .{ .position = .{ ndc_r, ndc_b }, .texcoord = .{ uv_r, uv_b } };
+            vertices[vertex_count + 3] = .{ .position = .{ ndc_l, ndc_t }, .texcoord = .{ uv_l, uv_t } };
+            vertices[vertex_count + 4] = .{ .position = .{ ndc_r, ndc_b }, .texcoord = .{ uv_r, uv_b } };
+            vertices[vertex_count + 5] = .{ .position = .{ ndc_r, ndc_t }, .texcoord = .{ uv_r, uv_t } };
+            vertex_count += 6;
+
+            cursor_x += glyph.advance;
+        }
+    }
+
+    if (vertex_count == 0) return;
 
     // Get current render pass descriptor and drawable from MTKView
     const rpd = msgSend(OptId, renderer.view, sel_("currentRenderPassDescriptor"), .{}) orelse return;
@@ -298,18 +416,18 @@ fn renderImpl(renderer: *Renderer) void {
     msgSend(void, encoder, sel_("setFragmentTexture:atIndex:"), .{ renderer.texture, @as(c_ulong, 0) });
     msgSend(void, encoder, sel_("setFragmentSamplerState:atIndex:"), .{ renderer.sampler, @as(c_ulong, 0) });
 
-    // Set vertex data (interleaved position + texcoord)
-    msgSend(void, encoder, sel_("setVertexBytes:length:atIndex:"), .{
-        @as(*const anyopaque, @ptrCast(&renderer.vertices)),
-        @as(c_ulong, @sizeOf(@TypeOf(renderer.vertices))),
+    // Bind vertex buffer
+    msgSend(void, encoder, sel_("setVertexBuffer:offset:atIndex:"), .{
+        renderer.vertex_buffer,
+        @as(c_ulong, 0),
         @as(c_ulong, 0),
     });
 
-    // Draw quad (6 vertices = 2 triangles)
+    // Draw all character quads
     msgSend(void, encoder, sel_("drawPrimitives:vertexStart:vertexCount:"), .{
         MTLPrimitiveTypeTriangle,
         @as(c_ulong, 0),
-        @as(c_ulong, 6),
+        @as(c_ulong, vertex_count),
     });
 
     // End encoding
@@ -324,6 +442,7 @@ fn deinitImpl(renderer: *Renderer) void {
     release(renderer.pipeline_state);
     release(renderer.texture);
     release(renderer.sampler);
+    release(renderer.vertex_buffer);
     release(renderer.command_queue);
     release(renderer.device);
     std.heap.page_allocator.destroy(renderer);
@@ -333,24 +452,26 @@ fn deinitImpl(renderer: *Renderer) void {
 // C ABI Exports
 // ============================================================================
 
-/// Initialize the Metal renderer. Pass the MTKView pointer.
-/// Returns an opaque renderer handle, or NULL on failure.
 export fn surface_init(view: OptId) callconv(.c) OptId {
     const v = view orelse return null;
     const renderer = initImpl(v) catch return null;
     return @ptrCast(renderer);
 }
 
-/// Render a frame (draws a textured glyph).
-/// Pass the opaque renderer handle from surface_init.
-export fn render_frame(renderer_ptr: OptId) callconv(.c) void {
+export fn render_frame(
+    renderer_ptr: OptId,
+    text_ptr: ?[*]const u8,
+    text_len: c_int,
+    view_width: f32,
+    view_height: f32,
+) callconv(.c) void {
     const ptr = renderer_ptr orelse return;
     const renderer: *Renderer = @ptrCast(@alignCast(ptr));
-    renderImpl(renderer);
+    const t = text_ptr orelse return;
+    const len: usize = if (text_len > 0) @intCast(text_len) else return;
+    renderImpl(renderer, t[0..len], view_width, view_height);
 }
 
-/// Destroy the Metal renderer and release all resources.
-/// Pass the opaque renderer handle from surface_init.
 export fn surface_deinit(renderer_ptr: OptId) callconv(.c) void {
     const ptr = renderer_ptr orelse return;
     const renderer: *Renderer = @ptrCast(@alignCast(ptr));

@@ -3,6 +3,8 @@ import MetalKit
 
 /// SwiftUI wrapper around MTKView that delegates rendering to the Zig Metal backend.
 struct MetalSurfaceView: NSViewRepresentable {
+    var text: String
+
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
@@ -14,8 +16,6 @@ struct MetalSurfaceView: NSViewRepresentable {
         view.preferredFramesPerSecond = 60
 
         // Initialize the Zig Metal renderer, passing the MTKView pointer.
-        // surface_init creates the MTLDevice, command queue, and pipeline,
-        // and configures the view.
         let viewPtr = Unmanaged.passUnretained(view).toOpaque()
         context.coordinator.renderer = surface_init(viewPtr)
 
@@ -23,16 +23,28 @@ struct MetalSurfaceView: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ nsView: MTKView, context: Context) {}
+    func updateNSView(_ nsView: MTKView, context: Context) {
+        context.coordinator.text = text
+    }
 
     class Coordinator: NSObject, MTKViewDelegate {
         var renderer: UnsafeMutableRawPointer?
+        var text: String = ""
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
         func draw(in view: MTKView) {
             guard let renderer = renderer else { return }
-            render_frame(renderer)
+            let size = view.drawableSize
+            text.withCString { cstr in
+                render_frame(
+                    renderer,
+                    cstr,
+                    Int32(text.utf8.count),
+                    Float(size.width),
+                    Float(size.height)
+                )
+            }
         }
 
         deinit {

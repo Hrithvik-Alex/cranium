@@ -207,11 +207,15 @@ void setCursorByteOffset(CEditSession *session, size_t byte_offset);
 void *surface_init(void *mtk_view);
 
 /**
- * Render a frame (currently draws a colored triangle).
+ * Render a frame with the given text string.
  *
  * @param renderer Opaque renderer handle from surface_init().
+ * @param text UTF-8 text to render.
+ * @param text_len Length of the text in bytes.
+ * @param view_width Drawable width in pixels.
+ * @param view_height Drawable height in pixels.
  */
-void render_frame(void *renderer);
+void render_frame(void *renderer, const char *text, int text_len, float view_width, float view_height);
 
 /**
  * Destroy the Metal renderer and release all Metal resources.
