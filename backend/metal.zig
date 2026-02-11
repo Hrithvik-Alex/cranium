@@ -609,7 +609,7 @@ fn renderImpl(renderer: *Renderer, text: []const u8, view_width: f32, view_heigh
         const now = std.time.nanoTimestamp();
         const elapsed_ns = now - renderer.start_time;
         const elapsed_s: f32 = @as(f32, @floatFromInt(@divTrunc(elapsed_ns, 1_000_000))) / 1000.0;
-        const opacity: f32 = 0.5 + 0.5 * @sin(elapsed_s * std.math.pi);
+        const opacity: f32 = 0.5 + 0.5 * @cos(elapsed_s * std.math.pi);
 
         // Build cursor quad in pixel coordinates (shader does NDC)
         const line_height = renderer.atlas.line_height;
@@ -731,6 +731,10 @@ fn hitTestImpl(renderer: *Renderer, text: []const u8, view_width: f32, click_x: 
     }
 
     if (best_byte > text.len) best_byte = text.len;
+
+    // Reset cursor blink timer so cursor is fully visible after click
+    renderer.start_time = std.time.nanoTimestamp();
+
     return @intCast(best_byte);
 }
 
