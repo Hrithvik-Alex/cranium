@@ -123,6 +123,7 @@ typedef struct CEditSession
     const char *text_ptr;
     size_t text_len;
     void *session_ptr;
+    size_t cursor_byte_offset;
 } CEditSession;
 
 /**
@@ -215,7 +216,20 @@ void *surface_init(void *mtk_view);
  * @param view_width Drawable width in pixels.
  * @param view_height Drawable height in pixels.
  */
-void render_frame(void *renderer, const char *text, int text_len, float view_width, float view_height);
+void render_frame(void *renderer, const char *text, int text_len, float view_width, float view_height, int cursor_byte_offset);
+
+/**
+ * Hit-test a click point against the renderer's text layout.
+ *
+ * @param renderer Opaque renderer handle from surface_init().
+ * @param text UTF-8 text currently displayed.
+ * @param text_len Length of the text in bytes.
+ * @param view_width Drawable width in pixels.
+ * @param click_x Click X in pixels (drawable coordinate space).
+ * @param click_y Click Y in pixels (drawable coordinate space).
+ * @return Byte offset of the nearest character boundary, or 0 on error.
+ */
+int hit_test(void *renderer, const char *text, int text_len, float view_width, float click_x, float click_y);
 
 /**
  * Destroy the Metal renderer and release all Metal resources.

@@ -7,13 +7,18 @@
 
 import SwiftUI
 import AppKit
+import MetalKit
 
 @Observable
 class FileViewModel {
     /// Pointer to the CEditSession handle from the Zig editor
     /// nil if no file has been opened or opening failed
     private var editSession: UnsafeMutablePointer<CEditSession>?
-    
+
+    /// Metal renderer pointer and view reference for hit testing
+    var rendererPtr: UnsafeMutableRawPointer?
+    weak var metalView: MTKView?
+
     /// Error message if parsing failed
     var errorMessage: String?
     /// Increments on edits to trigger SwiftUI refresh
@@ -41,6 +46,9 @@ class FileViewModel {
         guard let font = editSession?.pointee.font else { return nil }
         return EditorFont(from: font)
     }
+
+    /// Current cursor byte offset from Zig
+    var cursorByteOffset: Int = 0
     
     /// Open and parse a markdown file
     /// - Parameter filePath: Absolute path to the markdown file
@@ -101,7 +109,6 @@ class FileViewModel {
         guard let session = editSession else { return }
         handleKeyEvent(session, event.keyCode, UInt64(event.modifierFlags.rawValue))
         refreshText()
-        revision &+= 1
     }
 
     func sendInsertText(_ text: String) {
@@ -110,13 +117,12 @@ class FileViewModel {
             handleTextInput(session, cString)
         }
         refreshText()
-        revision &+= 1
     }
 
     func sendCursorByteOffset(_ offset: Int) {
         guard let session = editSession else { return }
         setCursorByteOffset(session, offset)
-        revision &+= 1
+        cursorByteOffset = Int(session.pointee.cursor_byte_offset)
     }
 
     private func refreshText() {
@@ -124,11 +130,13 @@ class FileViewModel {
         let length = session.pointee.text_len
         guard let ptr = session.pointee.text_ptr, length > 0 else {
             currentText = ""
+            cursorByteOffset = 0
             return
         }
         let uint8Ptr = UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self)
         let buffer = UnsafeBufferPointer(start: uint8Ptr, count: Int(length))
         currentText = String(decoding: buffer, as: UTF8.self)
+        cursorByteOffset = Int(session.pointee.cursor_byte_offset)
     }
 }
 
@@ -366,8 +374,14 @@ struct FileView: View {
             
             if viewModel.hasDocument {
                 ZStack(alignment: .topLeading) {
-                    MetalSurfaceView(text: viewModel.currentText)
-                        .id(viewModel.revision)
+                    MetalSurfaceView(
+                        text: viewModel.currentText,
+                        cursorByteOffset: viewModel.cursorByteOffset,
+                        onRendererReady: { renderer, metalView in
+                            viewModel.rendererPtr = renderer
+                            viewModel.metalView = metalView
+                        }
+                    )
 
                     EditorInputView(
                         font: viewModel.editorFont,
@@ -378,8 +392,8 @@ struct FileView: View {
                         onInsertText: { text in
                             handleInsertText(viewModel: viewModel, text: text)
                         },
-                        onMouseDown: { point, view in
-                            handleMouseClick(viewModel: viewModel, point: point, in: view)
+                        onMouseDown: { point, sourceView in
+                            handleMouseClick(viewModel: viewModel, point: point, in: sourceView)
                         }
                     )
                     .background(Color.clear)
@@ -436,23 +450,31 @@ struct FileView: View {
         viewModel.sendInsertText(text)
     }
 
-    private func handleMouseClick(viewModel: FileViewModel, point: NSPoint, in view: NSView) {
-        guard let textView = view as? NSTextView else {
-            return
+    private func handleMouseClick(viewModel: FileViewModel, point: NSPoint, in sourceView: NSView) {
+        guard let renderer = viewModel.rendererPtr,
+              let metalView = viewModel.metalView else { return }
+
+        // Convert click point from the source NSView to the MTKView's coordinate system
+        let metalPoint = sourceView.convert(point, to: metalView)
+
+        // Scale from NSView points to drawable pixels and flip Y (NSView is bottom-left, Metal layout is top-left)
+        let scale = metalView.window?.backingScaleFactor ?? 2.0
+        let clickX = Float(metalPoint.x * scale)
+        let clickY = Float((metalView.bounds.height - metalPoint.y) * scale)
+        let viewWidth = Float(metalView.drawableSize.width)
+
+        let byteOffset = viewModel.currentText.withCString { cstr in
+            hit_test(
+                renderer,
+                cstr,
+                Int32(viewModel.currentText.utf8.count),
+                viewWidth,
+                clickX,
+                clickY
+            )
         }
 
-        let charIndex = textView.characterIndexForInsertion(at: point)
-        let text = textView.string
-        if charIndex == NSNotFound {
-            viewModel.sendCursorByteOffset(text.utf8.count)
-            return
-        }
-
-        let clampedIndex = min(max(0, charIndex), text.utf16.count)
-        let stringIndex = String.Index(utf16Offset: clampedIndex, in: text)
-        let utf8Index = stringIndex.samePosition(in: text.utf8) ?? text.utf8.endIndex
-        let byteOffset = text.utf8.distance(from: text.utf8.startIndex, to: utf8Index)
-        viewModel.sendCursorByteOffset(byteOffset)
+        viewModel.sendCursorByteOffset(Int(byteOffset))
     }
 }
 

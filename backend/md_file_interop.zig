@@ -56,6 +56,7 @@ pub const CEditSession = extern struct {
     text_ptr: ?[*]const u8,
     text_len: usize,
     session_ptr: ?*anyopaque,
+    cursor_byte_offset: usize,
 
     /// Sync state from the internal EditSession to this CEditSession
     pub fn sync(self: *CEditSession) void {
@@ -72,6 +73,7 @@ pub const CEditSession = extern struct {
         self.active_block_id = session.cursor.active_block_id;
         self.text_ptr = session.editor.buffer.ptr;
         self.text_len = session.editor.size;
+        self.cursor_byte_offset = session.cursor.byte_offset;
 
         self.cursor_metrics = CCursorMetrics{
             .line_index = session.cursor.metrics.line_index,
@@ -237,6 +239,7 @@ export fn createEditSession(filename: [*:0]const u8) callconv(.c) ?*CEditSession
         .text_ptr = null,
         .text_len = 0,
         .session_ptr = session,
+        .cursor_byte_offset = 0,
     };
 
     c_session.sync();

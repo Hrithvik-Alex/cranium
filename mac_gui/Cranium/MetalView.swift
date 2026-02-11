@@ -4,6 +4,8 @@ import MetalKit
 /// SwiftUI wrapper around MTKView that delegates rendering to the Zig Metal backend.
 struct MetalSurfaceView: NSViewRepresentable {
     var text: String
+    var cursorByteOffset: Int
+    var onRendererReady: ((UnsafeMutableRawPointer, MTKView) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -17,7 +19,12 @@ struct MetalSurfaceView: NSViewRepresentable {
 
         // Initialize the Zig Metal renderer, passing the MTKView pointer.
         let viewPtr = Unmanaged.passUnretained(view).toOpaque()
-        context.coordinator.renderer = surface_init(viewPtr)
+        let renderer = surface_init(viewPtr)
+        context.coordinator.renderer = renderer
+
+        if let renderer = renderer {
+            onRendererReady?(renderer, view)
+        }
 
         view.delegate = context.coordinator
         return view
@@ -25,11 +32,13 @@ struct MetalSurfaceView: NSViewRepresentable {
 
     func updateNSView(_ nsView: MTKView, context: Context) {
         context.coordinator.text = text
+        context.coordinator.cursorByteOffset = cursorByteOffset
     }
 
     class Coordinator: NSObject, MTKViewDelegate {
         var renderer: UnsafeMutableRawPointer?
         var text: String = ""
+        var cursorByteOffset: Int = 0
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
@@ -42,7 +51,8 @@ struct MetalSurfaceView: NSViewRepresentable {
                     cstr,
                     Int32(text.utf8.count),
                     Float(size.width),
-                    Float(size.height)
+                    Float(size.height),
+                    Int32(cursorByteOffset)
                 )
             }
         }
