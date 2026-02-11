@@ -11,11 +11,13 @@ struct CursorVertexOut {
 
 vertex CursorVertexOut cursor_vertex_main(uint vid [[vertex_id]],
                                            constant CursorVertexIn *vertices [[buffer(0)]],
-                                           constant float2 &viewport [[buffer(1)]]) {
+                                           constant float2 &viewport [[buffer(1)]],
+                                           constant float &scroll_offset [[buffer(2)]]) {
     CursorVertexOut out;
     float2 pos = vertices[vid].position;
-    out.position = float4(pos.x / viewport.x * 2.0 - 1.0,
-                          1.0 - pos.y / viewport.y * 2.0,
+    float2 scrolled = float2(pos.x, pos.y - scroll_offset);
+    out.position = float4(scrolled.x / viewport.x * 2.0 - 1.0,
+                          1.0 - scrolled.y / viewport.y * 2.0,
                           0.0, 1.0);
     return out;
 }

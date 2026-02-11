@@ -238,6 +238,7 @@ final class EditorTextView: NSTextView {
     var onKeyEvent: ((NSEvent) -> Void)?
     var onInsertText: ((String) -> Void)?
     var onMouseDown: ((NSPoint) -> Void)?
+    var onScrollWheel: ((NSEvent) -> Void)?
 
     override var acceptsFirstResponder: Bool {
         true
@@ -267,7 +268,11 @@ final class EditorTextView: NSTextView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        nextResponder?.scrollWheel(with: event)
+        if let onScrollWheel = onScrollWheel {
+            onScrollWheel(event)
+        } else {
+            nextResponder?.scrollWheel(with: event)
+        }
     }
 }
 
@@ -277,6 +282,7 @@ struct EditorInputView: NSViewRepresentable {
     var onKeyEvent: (NSEvent) -> Void
     var onInsertText: (String) -> Void
     var onMouseDown: (NSPoint, NSView) -> Void
+    var onScrollWheel: ((NSEvent) -> Void)?
 
     func makeNSView(context: Context) -> NSView {
         let container = NSView(frame: .zero)
@@ -301,6 +307,7 @@ struct EditorInputView: NSViewRepresentable {
         textView.onMouseDown = { point in
             onMouseDown(point, textView)
         }
+        textView.onScrollWheel = onScrollWheel
 
         textView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(textView)
@@ -394,6 +401,9 @@ struct FileView: View {
                         },
                         onMouseDown: { point, sourceView in
                             handleMouseClick(viewModel: viewModel, point: point, in: sourceView)
+                        },
+                        onScrollWheel: { event in
+                            handleScrollWheel(viewModel: viewModel, event: event)
                         }
                     )
                     .background(Color.clear)
@@ -448,6 +458,16 @@ struct FileView: View {
 
     private func handleInsertText(viewModel: FileViewModel, text: String) {
         viewModel.sendInsertText(text)
+    }
+
+    private func handleScrollWheel(viewModel: FileViewModel, event: NSEvent) {
+        guard let renderer = viewModel.rendererPtr,
+              let metalView = viewModel.metalView else { return }
+
+        let scale = metalView.window?.backingScaleFactor ?? 2.0
+        // Positive scrollingDeltaY = scroll up = decrease scroll offset, so negate
+        let scaledDelta = Float(-event.scrollingDeltaY * scale)
+        update_scroll(renderer, scaledDelta)
     }
 
     private func handleMouseClick(viewModel: FileViewModel, point: NSPoint, in sourceView: NSView) {

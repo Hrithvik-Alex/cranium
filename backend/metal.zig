@@ -264,6 +264,9 @@ const Renderer = struct {
     layout_buf: []CharPos,
     layout_result: LayoutResult,
     layout_text_len: usize,
+    scroll_y: f32,
+    last_view_height: f32,
+    last_cursor_byte_offset: i32,
 
     fn ensureVertexCapacity(self: *Renderer, required_chars: usize) bool {
         if (required_chars <= self.glyph.char_capacity) return true;
@@ -485,13 +488,28 @@ fn initImpl(view: Id) !*Renderer {
         .layout_buf = layout_buf,
         .layout_result = .{ .count = 0, .final_x = MARGIN, .final_baseline_y = MARGIN },
         .layout_text_len = 0,
+        .scroll_y = 0,
+        .last_view_height = 0,
+        .last_cursor_byte_offset = -1,
     };
 
     return renderer;
 }
 
+fn updateScrollImpl(renderer: *Renderer, delta_y: f32) void {
+    renderer.scroll_y += delta_y;
+
+    // Clamp scroll_y: minimum 0, maximum so bottom of content aligns with bottom of view
+    const descent = renderer.atlas.line_height - renderer.atlas.ascent;
+    const content_height = renderer.layout_result.final_baseline_y + descent + MARGIN;
+    const max_scroll = @max(0, content_height - renderer.last_view_height);
+    renderer.scroll_y = std.math.clamp(renderer.scroll_y, 0, max_scroll);
+}
+
 fn renderImpl(renderer: *Renderer, text: []const u8, view_width: f32, view_height: f32, cursor_byte_offset: i32) void {
     if (view_width <= 0 or view_height <= 0) return;
+
+    renderer.last_view_height = view_height;
 
     const pool = objc_autoreleasePoolPush() orelse return;
     defer objc_autoreleasePoolPop(pool);
@@ -572,6 +590,20 @@ fn renderImpl(renderer: *Renderer, text: []const u8, view_width: f32, view_heigh
         }
     }
 
+    // Auto-scroll only when cursor position changes (typing, arrow keys, click)
+    if (has_cursor and cursor_found and cursor_byte_offset != renderer.last_cursor_byte_offset) {
+        const cursor_top = cursor_pos_y - renderer.atlas.ascent;
+        const cursor_bottom = cursor_pos_y - renderer.atlas.ascent + renderer.atlas.line_height;
+        if (cursor_top < renderer.scroll_y) {
+            renderer.scroll_y = cursor_top - MARGIN;
+        }
+        if (cursor_bottom > renderer.scroll_y + view_height) {
+            renderer.scroll_y = cursor_bottom - view_height + MARGIN;
+        }
+        renderer.scroll_y = @max(0, renderer.scroll_y);
+    }
+    renderer.last_cursor_byte_offset = cursor_byte_offset;
+
     // Get current render pass descriptor and drawable from MTKView
     const rpd = msgSend(OptId, renderer.view, sel_("currentRenderPassDescriptor"), .{}) orelse return;
     const drawable = msgSend(OptId, renderer.view, sel_("currentDrawable"), .{}) orelse return;
@@ -596,6 +628,7 @@ fn renderImpl(renderer: *Renderer, text: []const u8, view_width: f32, view_heigh
             @as(c_ulong, 0),
         });
         setVertexBytes(encoder, @ptrCast(&viewport), @sizeOf([2]f32), 1);
+        setVertexBytes(encoder, @ptrCast(&renderer.scroll_y), @sizeOf(f32), 2);
         msgSend(void, encoder, sel_("drawPrimitives:vertexStart:vertexCount:"), .{
             MTLPrimitiveTypeTriangle,
             @as(c_ulong, 0),
@@ -603,8 +636,11 @@ fn renderImpl(renderer: *Renderer, text: []const u8, view_width: f32, view_heigh
         });
     }
 
-    // Draw cursor
-    if (has_cursor and cursor_found) {
+    // Draw cursor only if it's within the visible viewport
+    const cursor_screen_top = if (cursor_found) cursor_pos_y - renderer.atlas.ascent - renderer.scroll_y else -1;
+    const cursor_screen_bottom = if (cursor_found) cursor_screen_top + renderer.atlas.line_height else -1;
+    const cursor_visible = cursor_found and cursor_screen_bottom > 0 and cursor_screen_top < view_height;
+    if (has_cursor and cursor_visible) {
         // Compute blinking opacity via sine wave
         const now = std.time.nanoTimestamp();
         const elapsed_ns = now - renderer.start_time;
@@ -635,6 +671,7 @@ fn renderImpl(renderer: *Renderer, text: []const u8, view_width: f32, view_heigh
             @as(c_ulong, 0),
         });
         setVertexBytes(encoder, @ptrCast(&viewport), @sizeOf([2]f32), 1);
+        setVertexBytes(encoder, @ptrCast(&renderer.scroll_y), @sizeOf(f32), 2);
         setFragmentBytes(encoder, @ptrCast(&opacity), @sizeOf(f32), 0);
         msgSend(void, encoder, sel_("drawPrimitives:vertexStart:vertexCount:"), .{
             MTLPrimitiveTypeTriangle,
@@ -655,6 +692,9 @@ fn renderImpl(renderer: *Renderer, text: []const u8, view_width: f32, view_heigh
 /// find the nearest byte offset in the text.
 fn hitTestImpl(renderer: *Renderer, text: []const u8, view_width: f32, click_x: f32, click_y: f32) i32 {
     if (text.len == 0) return 0;
+
+    // Convert screen click to absolute text coordinates by adding scroll offset
+    const abs_click_y = click_y + renderer.scroll_y;
 
     // Use cached layout if text length matches; otherwise recompute
     var layout = renderer.layout_result;
@@ -677,7 +717,7 @@ fn hitTestImpl(renderer: *Renderer, text: []const u8, view_width: f32, click_x: 
         const line_bottom = line_top + line_height;
 
         // Only consider characters on the clicked line (with some tolerance)
-        if (click_y < line_top or click_y >= line_bottom) continue;
+        if (abs_click_y < line_top or abs_click_y >= line_bottom) continue;
 
         // Distance to left edge of this character
         const dist_left = @abs(click_x - cp.x);
@@ -699,7 +739,7 @@ fn hitTestImpl(renderer: *Renderer, text: []const u8, view_width: f32, click_x: 
     if (best_dist == std.math.floatMax(f32)) {
         // Check if click is below the last line
         const last = renderer.layout_buf[layout.count - 1];
-        if (click_y >= last.baseline_y - ascent) {
+        if (abs_click_y >= last.baseline_y - ascent) {
             // Find last char on the last line and check x
             var last_on_line_idx: usize = layout.count - 1;
             const last_baseline = last.baseline_y;
@@ -789,6 +829,12 @@ export fn hit_test(
     const renderer: *Renderer = @ptrCast(@alignCast(ptr));
     const text: []const u8 = if (text_ptr) |t| (if (text_len > 0) t[0..@intCast(text_len)] else "") else "";
     return hitTestImpl(renderer, text, view_width, click_x, click_y);
+}
+
+export fn update_scroll(renderer_ptr: OptId, delta_y: f32) callconv(.c) void {
+    const ptr = renderer_ptr orelse return;
+    const renderer: *Renderer = @ptrCast(@alignCast(ptr));
+    updateScrollImpl(renderer, delta_y);
 }
 
 export fn surface_deinit(renderer_ptr: OptId) callconv(.c) void {

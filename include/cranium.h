@@ -232,6 +232,14 @@ void render_frame(void *renderer, const char *text, int text_len, float view_wid
 int hit_test(void *renderer, const char *text, int text_len, float view_width, float click_x, float click_y);
 
 /**
+ * Update the scroll offset by the given delta.
+ *
+ * @param renderer Opaque renderer handle from surface_init().
+ * @param delta_y Scroll delta in drawable pixels (positive = scroll down).
+ */
+void update_scroll(void *renderer, float delta_y);
+
+/**
  * Destroy the Metal renderer and release all Metal resources.
  *
  * @param renderer Opaque renderer handle from surface_init(). May be NULL (no-op).
