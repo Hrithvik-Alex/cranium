@@ -263,6 +263,10 @@ final class EditorTextView: NSTextView {
             onInsertText?("\n")
             return
         }
+        if selector == #selector(insertTab(_:)) {
+            onInsertText?("    ")
+            return
+        }
         // Swallow other default text system commands; Zig handles them.
     }
 
