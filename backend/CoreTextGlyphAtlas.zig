@@ -4,7 +4,7 @@ const Allocator = std.mem.Allocator;
 
 comptime {
     if (builtin.os.tag != .macos) {
-        @compileError("FontLoader.zig requires macOS CoreText/CoreGraphics/CoreFoundation.");
+        @compileError("CoreTextGlyphAtlas.zig requires macOS CoreText/CoreGraphics/CoreFoundation.");
     }
 }
 

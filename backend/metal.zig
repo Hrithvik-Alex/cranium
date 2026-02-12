@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const renderer = @import("renderer.zig");
-const FontLoader = @import("FontLoader.zig");
+const CoreTextGlyphAtlas = @import("CoreTextGlyphAtlas.zig");
 
 // Re-use types from renderer
 const GlyphVertex = renderer.GlyphVertex;
@@ -272,7 +272,7 @@ pub fn initImpl(view: Id) !*Renderer {
     const queue = msgSend(OptId, device, sel_("newCommandQueue"), .{}) orelse return error.NoCommandQueue;
 
     // 4. Rasterize glyph atlas (all printable ASCII at 48pt)
-    var atlas = FontLoader.rasterize_atlas(
+    var atlas = CoreTextGlyphAtlas.rasterize_atlas(
         std.heap.page_allocator,
         48.0,
         renderer.font_data,

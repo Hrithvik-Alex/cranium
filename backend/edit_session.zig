@@ -4,17 +4,13 @@ const unicode = std.unicode;
 
 const md_parser = @import("md_parser.zig");
 const Editor = @import("Editor.zig");
-const font = @import("font.zig");
+const core_text_font = @import("CoreTextFont.zig");
 
-const c = font.c;
-const EditorFont = font.EditorFont;
-const FontCache = font.FontCache;
-const createCTLine = font.createCTLine;
-const fontSizeForBlock = font.fontSizeForBlock;
-pub const default_editor_font = font.default_editor_font;
+const EditorFont = core_text_font.EditorFont;
+const FontCache = core_text_font.FontCache;
+const heading_sizes = core_text_font.heading_sizes;
 
-pub const Block = md_parser.Block;
-pub const BlockTypeTag = md_parser.BlockTypeTag;
+const Block = md_parser.Block;
 
 pub const Cursor = struct {
     byte_offset: usize,
@@ -40,7 +36,8 @@ pub const LineInfo = struct {
     y_start: f32,
     font_size: f32,
     block_id: usize,
-    ct_line: c.CTLineRef,
+    // TODO: get rid of this leaky abstraction
+    ct_line: core_text_font.CTLineHandle,
 };
 
 pub const CursorMetrics = struct {
@@ -96,7 +93,14 @@ fn fontSizeForBlockType(block_type: ?md_parser.BlockType, base_size: f32) f32 {
     const bt = block_type orelse return base_size;
     const tag = std.meta.activeTag(bt);
     const value = bt.getValue();
-    return fontSizeForBlock(tag, value, base_size);
+    return switch (tag) {
+        .Heading => blk: {
+            if (value == 0) break :blk base_size;
+            const idx = @min(value - 1, heading_sizes.len - 1);
+            break :blk heading_sizes[idx];
+        },
+        else => base_size,
+    };
 }
 
 fn computeLineInfo(
@@ -135,7 +139,7 @@ fn computeLineInfo(
 
             const line_text = text_ptr[line_start .. i + 1];
             const font_ref = session.font_cache.getFont(session.font, font_size);
-            const ct_line = createCTLine(font_ref, line_text);
+            const ct_line = core_text_font.createCTLine(font_ref, line_text);
 
             info[idx] = .{
                 .line_start = line_start,
@@ -208,8 +212,7 @@ fn updateCursorMetrics(session: *EditSession) void {
     const column_byte = session.cursor.byte_offset - current_line.line_start;
 
     const utf16_index = utf16IndexFromUtf8ByteOffset(line_text, column_byte);
-    var secondary: c.CGFloat = 0;
-    const caret_x = c.CTLineGetOffsetForStringIndex(current_line.ct_line, @as(c.CFIndex, @intCast(utf16_index)), &secondary);
+    const caret_x = core_text_font.getCaretX(current_line.ct_line, utf16_index);
 
     const line_height = session.font_cache.getLineHeight(session.font, current_line.font_size);
     const caret_y: f32 = current_line.y_start;
@@ -225,7 +228,7 @@ fn updateCursorMetrics(session: *EditSession) void {
 
 fn releaseLineInfo(line_info: []LineInfo) void {
     for (line_info) |info| {
-        c.CFRelease(info.ct_line);
+        core_text_font.releaseCTLine(info.ct_line);
     }
 }
 
@@ -281,8 +284,8 @@ pub fn create(filename: []const u8) !*EditSession {
         .editor = editor,
         .file_path = file_path,
         .line_info = &[_]LineInfo{},
-        .font = default_editor_font,
-        .font_cache = FontCache.init(default_editor_font.size),
+        .font = core_text_font.default_editor_font,
+        .font_cache = FontCache.init(core_text_font.default_editor_font.size),
         .root_block = null,
         .cursor = .{
             .byte_offset = 0,

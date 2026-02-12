@@ -1,27 +1,20 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const md_parser = @import("md_parser.zig");
 
 comptime {
     if (builtin.os.tag != .macos) {
-        @compileError("font.zig requires macOS CoreText/CoreGraphics/CoreFoundation.");
+        @compileError("CoreTextFont.zig requires macOS CoreText/CoreGraphics/CoreFoundation.");
     }
 }
 
-pub const c = @cImport({
+const c = @cImport({
     @cInclude("CoreText/CoreText.h");
     @cInclude("CoreFoundation/CoreFoundation.h");
     @cInclude("CoreGraphics/CoreGraphics.h");
 });
 
-/// C-compatible font struct for the Swift bridge
-pub const CEditorFont = extern struct {
-    family_ptr: ?[*]const u8,
-    family_len: usize,
-    size: f32,
-    weight: f32,
-    is_monospaced: u8,
-};
+/// Opaque handle to a CoreText line; use getCaretX and releaseCTLine
+pub const CTLineHandle = *anyopaque;
 
 /// Internal font representation
 pub const EditorFont = struct {
@@ -29,16 +22,6 @@ pub const EditorFont = struct {
     size: f32,
     weight: f32,
     is_monospaced: bool,
-
-    pub fn toC(self: EditorFont) CEditorFont {
-        return CEditorFont{
-            .family_ptr = self.family.ptr,
-            .family_len = self.family.len,
-            .size = self.size,
-            .weight = self.weight,
-            .is_monospaced = if (self.is_monospaced) 1 else 0,
-        };
-    }
 };
 
 pub const default_editor_font = EditorFont{
@@ -129,7 +112,7 @@ fn createCFString(text: []const u8) c.CFStringRef {
     return c.CFStringCreateWithBytes(null, text.ptr, len, c.kCFStringEncodingUTF8, 0);
 }
 
-pub fn createCTLine(font_ref: c.CTFontRef, text: []const u8) c.CTLineRef {
+pub fn createCTLine(font_ref: c.CTFontRef, text: []const u8) CTLineHandle {
     const cf_str = createCFString(text);
     defer c.CFRelease(cf_str);
 
@@ -155,18 +138,22 @@ pub fn createCTLine(font_ref: c.CTFontRef, text: []const u8) c.CTLineRef {
     const attr_str = c.CFAttributedStringCreate(null, cf_str, attrs);
     defer c.CFRelease(attr_str);
 
-    return c.CTLineCreateWithAttributedString(attr_str);
+    const line_ref = c.CTLineCreateWithAttributedString(attr_str);
+    return @ptrCast(@constCast(line_ref));
 }
 
-/// Get font size for a block type. Returns heading size for headings, base_size otherwise.
-pub fn fontSizeForBlock(block_type: ?md_parser.BlockTypeTag, block_type_value: usize, base_size: f32) f32 {
-    const bt = block_type orelse return base_size;
-    switch (bt) {
-        .Heading => {
-            if (block_type_value == 0) return base_size;
-            const idx = @min(@as(usize, @intCast(block_type_value - 1)), heading_sizes.len - 1);
-            return heading_sizes[idx];
-        },
-        else => return base_size,
-    }
+/// Returns the x offset for a caret at the given UTF-16 index within the line.
+pub fn getCaretX(ct_line: CTLineHandle, utf16_index: usize) f32 {
+    var secondary: c.CGFloat = 0;
+    const offset = c.CTLineGetOffsetForStringIndex(
+        @ptrCast(ct_line),
+        @as(c.CFIndex, @intCast(utf16_index)),
+        &secondary,
+    );
+    return @floatCast(offset);
+}
+
+/// Releases the CoreText line; call when done with a line created by createCTLine.
+pub fn releaseCTLine(ct_line: CTLineHandle) void {
+    c.CFRelease(@ptrCast(ct_line));
 }

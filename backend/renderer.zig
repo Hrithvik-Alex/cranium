@@ -1,9 +1,9 @@
 // renderer.zig - Pure rendering logic (text layout, hit testing, scroll, vertex generation)
 //
-// No Metal/ObjC dependencies. Only imports std and FontLoader.
+// No Metal/ObjC dependencies. Only imports std and CoreTextGlyphAtlas.
 
 const std = @import("std");
-const FontLoader = @import("FontLoader.zig");
+const CoreTextGlyphAtlas = @import("CoreTextGlyphAtlas.zig");
 
 // ============================================================================
 // Vertex Data
@@ -92,7 +92,7 @@ pub const CursorInfo = struct {
 // ============================================================================
 
 pub const RendererState = struct {
-    atlas: FontLoader.GlyphAtlas,
+    atlas: CoreTextGlyphAtlas.GlyphAtlas,
     start_time: i128,
     layout_buf: []CharPos,
     layout_result: LayoutResult,
@@ -123,7 +123,7 @@ pub const RendererState = struct {
 
 /// Walk the text using word-wrap logic, recording the pixel position of each byte.
 /// `out` must have at least `text.len` entries.
-pub fn layoutText(atlas: *const FontLoader.GlyphAtlas, text: []const u8, view_width: f32, out: []CharPos) LayoutResult {
+pub fn layoutText(atlas: *const CoreTextGlyphAtlas.GlyphAtlas, text: []const u8, view_width: f32, out: []CharPos) LayoutResult {
     const max_x: f32 = view_width - MARGIN;
     var cursor_x: f32 = MARGIN;
     var baseline_y: f32 = MARGIN + atlas.ascent;
@@ -217,7 +217,7 @@ pub fn buildGlyphVertices(
 ) usize {
     const aw: f32 = @floatFromInt(state.atlas.width);
     const ah: f32 = @floatFromInt(state.atlas.height);
-    const pad = FontLoader.GLYPH_PAD;
+    const pad = CoreTextGlyphAtlas.GLYPH_PAD;
     var vertex_count: usize = 0;
 
     for (state.layout_buf[0..state.layout_result.count]) |cp| {

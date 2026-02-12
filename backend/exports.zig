@@ -7,15 +7,35 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const md_parser = @import("md_parser.zig");
-const font = @import("font.zig");
+const core_text_font = @import("CoreTextFont.zig");
 const edit_session = @import("edit_session.zig");
 const metal = @import("metal.zig");
 
 const EditSession = edit_session.EditSession;
+const EditorFont = core_text_font.EditorFont;
 
 pub const Block = md_parser.Block;
 pub const BlockType = md_parser.BlockType;
 pub const BlockTypeTag = md_parser.BlockTypeTag;
+
+/// C-compatible font struct for the Swift bridge
+pub const CEditorFont = extern struct {
+    family_ptr: ?[*]const u8,
+    family_len: usize,
+    size: f32,
+    weight: f32,
+    is_monospaced: u8,
+};
+
+fn editorFontToC(font: EditorFont) CEditorFont {
+    return CEditorFont{
+        .family_ptr = font.family.ptr,
+        .family_len = font.family.len,
+        .size = font.size,
+        .weight = font.weight,
+        .is_monospaced = if (font.is_monospaced) 1 else 0,
+    };
+}
 
 pub const CBlock = extern struct {
     block_type: BlockTypeTag,
@@ -38,8 +58,6 @@ pub const CDocument = extern struct {
     /// This is *std.heap.ArenaAllocator but stored as opaque for C compatibility
     arena_ptr: ?*anyopaque,
 };
-
-pub const CEditorFont = font.CEditorFont;
 
 pub const CCursorMetrics = extern struct {
     line_index: usize,
@@ -203,7 +221,7 @@ export fn createEditSession(filename: [*:0]const u8) callconv(.c) ?*CEditSession
             .caret_y = 0,
             .line_height = 0,
         },
-        .font = edit_session.default_editor_font.toC(),
+        .font = editorFontToC(core_text_font.default_editor_font),
         .text_ptr = null,
         .text_len = 0,
         .session_ptr = session,
