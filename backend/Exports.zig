@@ -1,4 +1,4 @@
-// exports.zig - All C ABI exports for Swift consumption
+// Exports.zig - All C ABI exports for Swift consumption
 //
 // This is the root source file for the static library. All export functions
 // that are declared in cranium.h live here.
@@ -6,17 +6,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const md_parser = @import("md_parser.zig");
+const MdParser = @import("MdParser.zig");
 const core_text_font = @import("CoreTextFont.zig");
-const edit_session = @import("edit_session.zig");
-const metal = @import("metal.zig");
+const EditSession = @import("EditSession.zig");
+const Metal = @import("Metal.zig");
 
-const EditSession = edit_session.EditSession;
 const EditorFont = core_text_font.EditorFont;
 
-pub const Block = md_parser.Block;
-pub const BlockType = md_parser.BlockType;
-pub const BlockTypeTag = md_parser.BlockTypeTag;
+pub const Block = MdParser.Block;
+pub const BlockType = MdParser.BlockType;
+pub const BlockTypeTag = MdParser.BlockTypeTag;
 
 /// C-compatible font struct for the Swift bridge
 pub const CEditorFont = extern struct {
@@ -166,8 +165,8 @@ fn openDocumentImpl(filename_slice: []const u8) !*CDocument {
 
     const file_contents = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
 
-    const block = try md_parser.parseBlocks(allocator, file_contents);
-    try md_parser.parseInline(allocator, block);
+    const block = try MdParser.parseBlocks(allocator, file_contents);
+    try MdParser.parseInline(allocator, block);
 
     var id_counter: usize = 1;
     const c_block = try toCBlock(allocator, block, &id_counter);
@@ -207,7 +206,7 @@ export fn createFile(filename: [*:0]const u8) callconv(.c) c_int {
 // ============================================================================
 
 export fn createEditSession(filename: [*:0]const u8) callconv(.c) ?*CEditSession {
-    const session = edit_session.create(std.mem.span(filename)) catch return null;
+    const session = EditSession.create(std.mem.span(filename)) catch return null;
 
     // Allocate CEditSession from the session's arena
     const c_session = session.session_arena.allocator().create(CEditSession) catch return null;
@@ -235,14 +234,14 @@ export fn createEditSession(filename: [*:0]const u8) callconv(.c) ?*CEditSession
 export fn closeEditSession(session_ptr: ?*CEditSession) callconv(.c) void {
     const c_session = session_ptr orelse return;
     const session: *EditSession = @ptrCast(@alignCast(c_session.session_ptr orelse return));
-    edit_session.close(session);
+    session.close();
 }
 
 export fn handleTextInput(session_ptr: ?*CEditSession, text: [*:0]const u8) callconv(.c) void {
     const c_session = session_ptr orelse return;
     const session: *EditSession = @ptrCast(@alignCast(c_session.session_ptr orelse return));
 
-    edit_session.insertText(session, std.mem.span(text)) catch return;
+    session.insertText(std.mem.span(text)) catch return;
     c_session.sync();
 }
 
@@ -252,19 +251,19 @@ export fn handleKeyEvent(session_ptr: ?*CEditSession, key_code: u16, modifiers: 
 
     const cmd_mask: u64 = 1 << 20;
     if ((modifiers & cmd_mask) != 0 and key_code == 1) {
-        edit_session.saveFile(session) catch {};
+        session.saveFile() catch {};
         return;
     }
 
     switch (key_code) {
-        36 => edit_session.insertText(session, "\n") catch return,
-        48 => edit_session.insertText(session, "    ") catch return,
-        51 => edit_session.deleteBackward(session) catch return,
-        117 => edit_session.deleteForward(session) catch return,
-        123 => edit_session.moveCursorLeft(session),
-        124 => edit_session.moveCursorRight(session),
-        126 => edit_session.moveCursorUp(session),
-        125 => edit_session.moveCursorDown(session),
+        36 => session.insertText("\n") catch return,
+        48 => session.insertText("    ") catch return,
+        51 => session.deleteBackward() catch return,
+        117 => session.deleteForward() catch return,
+        123 => session.moveCursorLeft(),
+        124 => session.moveCursorRight(),
+        126 => session.moveCursorUp(),
+        125 => session.moveCursorDown(),
         else => {},
     }
     c_session.sync();
@@ -273,7 +272,7 @@ export fn handleKeyEvent(session_ptr: ?*CEditSession, key_code: u16, modifiers: 
 export fn setCursorByteOffset(session_ptr: ?*CEditSession, byte_offset: usize) callconv(.c) void {
     const c_session = session_ptr orelse return;
     const session: *EditSession = @ptrCast(@alignCast(c_session.session_ptr orelse return));
-    edit_session.setCursorOffset(session, byte_offset);
+    session.setCursorOffset(byte_offset);
     c_session.sync();
 }
 
@@ -283,7 +282,7 @@ export fn setCursorByteOffset(session_ptr: ?*CEditSession, byte_offset: usize) c
 
 export fn surface_init(view: ?*anyopaque) callconv(.c) ?*anyopaque {
     const v = view orelse return null;
-    const r = metal.initImpl(v) catch return null;
+    const r = Metal.init(v) catch return null;
     return @ptrCast(r);
 }
 
@@ -296,9 +295,9 @@ export fn render_frame(
     cursor_byte_offset: c_int,
 ) callconv(.c) void {
     const ptr = renderer_ptr orelse return;
-    const r: *metal.Renderer = @ptrCast(@alignCast(ptr));
+    const r: *Metal = @ptrCast(@alignCast(ptr));
     const text: []const u8 = if (text_ptr) |t| (if (text_len > 0) t[0..@intCast(text_len)] else "") else "";
-    metal.renderImpl(r, text, view_width, view_height, cursor_byte_offset);
+    r.render(text, view_width, view_height, cursor_byte_offset);
 }
 
 export fn hit_test(
@@ -310,19 +309,19 @@ export fn hit_test(
     click_y: f32,
 ) callconv(.c) c_int {
     const ptr = renderer_ptr orelse return 0;
-    const r: *metal.Renderer = @ptrCast(@alignCast(ptr));
+    const r: *Metal = @ptrCast(@alignCast(ptr));
     const text: []const u8 = if (text_ptr) |t| (if (text_len > 0) t[0..@intCast(text_len)] else "") else "";
-    return metal.hitTestImpl(r, text, view_width, click_x, click_y);
+    return r.hitTest(text, view_width, click_x, click_y);
 }
 
 export fn update_scroll(renderer_ptr: ?*anyopaque, delta_y: f32) callconv(.c) void {
     const ptr = renderer_ptr orelse return;
-    const r: *metal.Renderer = @ptrCast(@alignCast(ptr));
-    metal.updateScrollImpl(r, delta_y);
+    const r: *Metal = @ptrCast(@alignCast(ptr));
+    r.updateScroll(delta_y);
 }
 
 export fn surface_deinit(renderer_ptr: ?*anyopaque) callconv(.c) void {
     const ptr = renderer_ptr orelse return;
-    const r: *metal.Renderer = @ptrCast(@alignCast(ptr));
-    metal.deinitImpl(r);
+    const r: *Metal = @ptrCast(@alignCast(ptr));
+    r.deinit();
 }

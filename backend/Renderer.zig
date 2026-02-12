@@ -1,9 +1,11 @@
-// renderer.zig - Pure rendering logic (text layout, hit testing, scroll, vertex generation)
+// Renderer.zig - Pure rendering logic (text layout, hit testing, scroll, vertex generation)
 //
 // No Metal/ObjC dependencies. Only imports std and CoreTextGlyphAtlas.
 
 const std = @import("std");
 const CoreTextGlyphAtlas = @import("CoreTextGlyphAtlas.zig");
+
+const Self = @This();
 
 // ============================================================================
 // Vertex Data
@@ -88,34 +90,32 @@ pub const CursorInfo = struct {
 };
 
 // ============================================================================
-// Renderer State (pure data, no Metal objects)
+// Struct Fields
 // ============================================================================
 
-pub const RendererState = struct {
-    atlas: CoreTextGlyphAtlas.GlyphAtlas,
-    start_time: i128,
-    layout_buf: []CharPos,
-    layout_result: LayoutResult,
-    layout_text_len: usize,
-    scroll_y: f32,
-    last_view_height: f32,
-    last_cursor_byte_offset: i32,
+atlas: CoreTextGlyphAtlas.GlyphAtlas,
+start_time: i128,
+layout_buf: []CharPos,
+layout_result: LayoutResult,
+layout_text_len: usize,
+scroll_y: f32,
+last_view_height: f32,
+last_cursor_byte_offset: i32,
 
-    pub fn ensureLayoutCapacity(self: *RendererState, needed: usize) bool {
-        if (self.layout_buf.len >= needed) return true;
+pub fn ensureLayoutCapacity(self: *Self, needed: usize) bool {
+    if (self.layout_buf.len >= needed) return true;
 
-        var new_cap = if (self.layout_buf.len == 0) @as(usize, 1024) else self.layout_buf.len;
-        while (new_cap < needed) {
-            new_cap *= 2;
-        }
-
-        if (self.layout_buf.len > 0) {
-            std.heap.page_allocator.free(self.layout_buf);
-        }
-        self.layout_buf = std.heap.page_allocator.alloc(CharPos, new_cap) catch return false;
-        return true;
+    var new_cap = if (self.layout_buf.len == 0) @as(usize, 1024) else self.layout_buf.len;
+    while (new_cap < needed) {
+        new_cap *= 2;
     }
-};
+
+    if (self.layout_buf.len > 0) {
+        std.heap.page_allocator.free(self.layout_buf);
+    }
+    self.layout_buf = std.heap.page_allocator.alloc(CharPos, new_cap) catch return false;
+    return true;
+}
 
 // ============================================================================
 // Text Layout
@@ -123,10 +123,10 @@ pub const RendererState = struct {
 
 /// Walk the text using word-wrap logic, recording the pixel position of each byte.
 /// `out` must have at least `text.len` entries.
-pub fn layoutText(atlas: *const CoreTextGlyphAtlas.GlyphAtlas, text: []const u8, view_width: f32, out: []CharPos) LayoutResult {
+pub fn layoutText(self: *const Self, text: []const u8, view_width: f32, out: []CharPos) LayoutResult {
     const max_x: f32 = view_width - MARGIN;
     var cursor_x: f32 = MARGIN;
-    var baseline_y: f32 = MARGIN + atlas.ascent;
+    var baseline_y: f32 = MARGIN + self.atlas.ascent;
     var count: usize = 0;
 
     var i: usize = 0;
@@ -135,13 +135,13 @@ pub fn layoutText(atlas: *const CoreTextGlyphAtlas.GlyphAtlas, text: []const u8,
             out[count] = .{ .x = cursor_x, .baseline_y = baseline_y, .advance = 0, .byte_index = i };
             count += 1;
             cursor_x = MARGIN;
-            baseline_y += atlas.line_height;
+            baseline_y += self.atlas.line_height;
             i += 1;
             continue;
         }
 
         if (text[i] == ' ') {
-            const adv: f32 = if (atlas.getGlyphInfo(' ')) |g| g.advance else 0;
+            const adv: f32 = if (self.atlas.getGlyphInfo(' ')) |g| g.advance else 0;
             out[count] = .{ .x = cursor_x, .baseline_y = baseline_y, .advance = adv, .byte_index = i };
             count += 1;
             cursor_x += adv;
@@ -157,7 +157,7 @@ pub fn layoutText(atlas: *const CoreTextGlyphAtlas.GlyphAtlas, text: []const u8,
         // Measure word width
         var word_width: f32 = 0;
         for (word) |ch| {
-            if (atlas.getGlyphInfo(@intCast(ch))) |g| {
+            if (self.atlas.getGlyphInfo(@intCast(ch))) |g| {
                 word_width += g.advance;
             }
         }
@@ -165,19 +165,19 @@ pub fn layoutText(atlas: *const CoreTextGlyphAtlas.GlyphAtlas, text: []const u8,
         // Word wrap
         if (cursor_x + word_width > max_x and cursor_x > MARGIN + 0.1) {
             cursor_x = MARGIN;
-            baseline_y += atlas.line_height;
+            baseline_y += self.atlas.line_height;
         }
 
         // Lay out each character in the word
         for (word, 0..) |ch, char_idx| {
-            const glyph = atlas.getGlyphInfo(@intCast(ch));
+            const glyph = self.atlas.getGlyphInfo(@intCast(ch));
             const adv: f32 = if (glyph) |g| g.advance else 0;
 
             // Character wrap
             if (glyph) |g| {
                 if (cursor_x + g.advance > max_x and cursor_x > MARGIN + 0.1) {
                     cursor_x = MARGIN;
-                    baseline_y += atlas.line_height;
+                    baseline_y += self.atlas.line_height;
                 }
             }
 
@@ -194,14 +194,14 @@ pub fn layoutText(atlas: *const CoreTextGlyphAtlas.GlyphAtlas, text: []const u8,
 // Scroll Management
 // ============================================================================
 
-pub fn updateScroll(state: *RendererState, delta_y: f32) void {
-    state.scroll_y += delta_y;
+pub fn updateScroll(self: *Self, delta_y: f32) void {
+    self.scroll_y += delta_y;
 
     // Clamp scroll_y: minimum 0, maximum so bottom of content aligns with bottom of view
-    const descent = state.atlas.line_height - state.atlas.ascent;
-    const content_height = state.layout_result.final_baseline_y + descent + MARGIN;
-    const max_scroll = @max(0, content_height - state.last_view_height);
-    state.scroll_y = std.math.clamp(state.scroll_y, 0, max_scroll);
+    const descent = self.atlas.line_height - self.atlas.ascent;
+    const content_height = self.layout_result.final_baseline_y + descent + MARGIN;
+    const max_scroll = @max(0, content_height - self.last_view_height);
+    self.scroll_y = std.math.clamp(self.scroll_y, 0, max_scroll);
 }
 
 // ============================================================================
@@ -210,22 +210,22 @@ pub fn updateScroll(state: *RendererState, delta_y: f32) void {
 
 /// Build glyph vertices from layout positions. Returns vertex count written.
 pub fn buildGlyphVertices(
-    state: *const RendererState,
+    self: *const Self,
     text: []const u8,
     vertices: [*]GlyphVertex,
     max_vertices: usize,
 ) usize {
-    const aw: f32 = @floatFromInt(state.atlas.width);
-    const ah: f32 = @floatFromInt(state.atlas.height);
+    const aw: f32 = @floatFromInt(self.atlas.width);
+    const ah: f32 = @floatFromInt(self.atlas.height);
     const pad = CoreTextGlyphAtlas.GLYPH_PAD;
     var vertex_count: usize = 0;
 
-    for (state.layout_buf[0..state.layout_result.count]) |cp| {
+    for (self.layout_buf[0..self.layout_result.count]) |cp| {
         if (cp.byte_index >= text.len) break;
         const ch = text[cp.byte_index];
         if (ch == '\n' or ch == ' ') continue;
 
-        const glyph = state.atlas.getGlyphInfo(@intCast(ch)) orelse continue;
+        const glyph = self.atlas.getGlyphInfo(@intCast(ch)) orelse continue;
         if (glyph.width == 0 or glyph.height == 0) continue;
         if (vertex_count + 6 > max_vertices) break;
 
@@ -259,16 +259,16 @@ pub fn buildGlyphVertices(
 // ============================================================================
 
 /// Resolve cursor pixel position from layout data.
-pub fn resolveCursorPos(state: *const RendererState, cursor_byte_offset: i32, text: []const u8) CursorInfo {
+pub fn resolveCursorPos(self: *const Self, cursor_byte_offset: i32, text: []const u8) CursorInfo {
     if (cursor_byte_offset < 0) {
-        return .{ .x = MARGIN, .y = MARGIN + state.atlas.ascent, .found = false };
+        return .{ .x = MARGIN, .y = MARGIN + self.atlas.ascent, .found = false };
     }
 
     const target: usize = @intCast(cursor_byte_offset);
-    const layout = state.layout_result;
+    const layout = self.layout_result;
 
     // Search layout entries for the matching byte offset
-    for (state.layout_buf[0..layout.count]) |cp| {
+    for (self.layout_buf[0..layout.count]) |cp| {
         if (cp.byte_index == target) {
             return .{ .x = cp.x, .y = cp.baseline_y, .found = true };
         }
@@ -279,39 +279,39 @@ pub fn resolveCursorPos(state: *const RendererState, cursor_byte_offset: i32, te
         return .{ .x = layout.final_x, .y = layout.final_baseline_y, .found = true };
     }
 
-    return .{ .x = MARGIN, .y = MARGIN + state.atlas.ascent, .found = false };
+    return .{ .x = MARGIN, .y = MARGIN + self.atlas.ascent, .found = false };
 }
 
 /// Auto-scroll only when cursor position changes (typing, arrow keys, click).
-pub fn autoScroll(state: *RendererState, cursor_info: CursorInfo, cursor_byte_offset: i32, view_height: f32) void {
+pub fn autoScroll(self: *Self, cursor_info: CursorInfo, cursor_byte_offset: i32, view_height: f32) void {
     if (cursor_byte_offset < 0 or !cursor_info.found) return;
-    if (cursor_byte_offset == state.last_cursor_byte_offset) return;
+    if (cursor_byte_offset == self.last_cursor_byte_offset) return;
 
-    const cursor_top = cursor_info.y - state.atlas.ascent;
-    const cursor_bottom = cursor_info.y - state.atlas.ascent + state.atlas.line_height;
-    if (cursor_top < state.scroll_y) {
-        state.scroll_y = cursor_top - MARGIN;
+    const cursor_top = cursor_info.y - self.atlas.ascent;
+    const cursor_bottom = cursor_info.y - self.atlas.ascent + self.atlas.line_height;
+    if (cursor_top < self.scroll_y) {
+        self.scroll_y = cursor_top - MARGIN;
     }
-    if (cursor_bottom > state.scroll_y + view_height) {
-        state.scroll_y = cursor_bottom - view_height + MARGIN;
+    if (cursor_bottom > self.scroll_y + view_height) {
+        self.scroll_y = cursor_bottom - view_height + MARGIN;
     }
-    state.scroll_y = @max(0, state.scroll_y);
+    self.scroll_y = @max(0, self.scroll_y);
 }
 
 /// Check if cursor is within the visible viewport.
-pub fn isCursorVisible(state: *const RendererState, cursor_info: CursorInfo, view_height: f32) bool {
+pub fn isCursorVisible(self: *const Self, cursor_info: CursorInfo, view_height: f32) bool {
     if (!cursor_info.found) return false;
-    const cursor_screen_top = cursor_info.y - state.atlas.ascent - state.scroll_y;
-    const cursor_screen_bottom = cursor_screen_top + state.atlas.line_height;
+    const cursor_screen_top = cursor_info.y - self.atlas.ascent - self.scroll_y;
+    const cursor_screen_bottom = cursor_screen_top + self.atlas.line_height;
     return cursor_screen_bottom > 0 and cursor_screen_top < view_height;
 }
 
 /// Build 6 cursor vertices into the provided slice.
-pub fn buildCursorVertices(state: *const RendererState, cursor_info: CursorInfo, cursor_verts: [*]CursorVertex) void {
-    const line_height = state.atlas.line_height;
+pub fn buildCursorVertices(self: *const Self, cursor_info: CursorInfo, cursor_verts: [*]CursorVertex) void {
+    const line_height = self.atlas.line_height;
     const c_left = cursor_info.x;
     const c_right = cursor_info.x + CURSOR_WIDTH;
-    const c_top = cursor_info.y - state.atlas.ascent;
+    const c_top = cursor_info.y - self.atlas.ascent;
     const c_bottom = c_top + line_height;
 
     const cpos = quadPositions(c_left, c_top, c_right, c_bottom);
@@ -321,9 +321,9 @@ pub fn buildCursorVertices(state: *const RendererState, cursor_info: CursorInfo,
 }
 
 /// Cursor blink opacity via sine wave.
-pub fn cursorOpacity(state: *const RendererState) f32 {
+pub fn cursorOpacity(self: *const Self) f32 {
     const now = std.time.nanoTimestamp();
-    const elapsed_ns = now - state.start_time;
+    const elapsed_ns = now - self.start_time;
     const elapsed_s: f32 = @as(f32, @floatFromInt(@divTrunc(elapsed_ns, 1_000_000))) / 1000.0;
     return 0.5 + 0.5 * @cos(elapsed_s * std.math.pi);
 }
@@ -333,28 +333,28 @@ pub fn cursorOpacity(state: *const RendererState) f32 {
 // ============================================================================
 
 /// Given a click point in pixel coordinates, find the nearest byte offset in the text.
-pub fn hitTest(state: *RendererState, text: []const u8, view_width: f32, click_x: f32, click_y: f32) i32 {
+pub fn hitTest(self: *Self, text: []const u8, view_width: f32, click_x: f32, click_y: f32) i32 {
     if (text.len == 0) return 0;
 
     // Convert screen click to absolute text coordinates by adding scroll offset
-    const abs_click_y = click_y + state.scroll_y;
+    const abs_click_y = click_y + self.scroll_y;
 
     // Use cached layout if text length matches; otherwise recompute
-    var layout = state.layout_result;
-    if (state.layout_text_len != text.len) {
-        if (!state.ensureLayoutCapacity(text.len)) return 0;
-        layout = layoutText(&state.atlas, text, view_width, state.layout_buf);
+    var layout = self.layout_result;
+    if (self.layout_text_len != text.len) {
+        if (!self.ensureLayoutCapacity(text.len)) return 0;
+        layout = self.layoutText(text, view_width, self.layout_buf);
     }
     if (layout.count == 0) return 0;
 
-    const line_height = state.atlas.line_height;
-    const ascent = state.atlas.ascent;
+    const line_height = self.atlas.line_height;
+    const ascent = self.atlas.ascent;
 
     // Find which visual line was clicked (by baseline_y)
     var best_byte: usize = text.len; // default: end of text
     var best_dist: f32 = std.math.floatMax(f32);
 
-    for (state.layout_buf[0..layout.count]) |cp| {
+    for (self.layout_buf[0..layout.count]) |cp| {
         const line_top = cp.baseline_y - ascent;
         const line_bottom = line_top + line_height;
 
@@ -380,7 +380,7 @@ pub fn hitTest(state: *RendererState, text: []const u8, view_width: f32, click_x
     // If no line matched (click below all text), place cursor at end
     if (best_dist == std.math.floatMax(f32)) {
         // Check if click is below the last line
-        const last = state.layout_buf[layout.count - 1];
+        const last = self.layout_buf[layout.count - 1];
         if (abs_click_y >= last.baseline_y - ascent) {
             // Find last char on the last line and check x
             var last_on_line_idx: usize = layout.count - 1;
@@ -389,7 +389,7 @@ pub fn hitTest(state: *RendererState, text: []const u8, view_width: f32, click_x
             var scan: usize = layout.count;
             while (scan > 0) {
                 scan -= 1;
-                if (state.layout_buf[scan].baseline_y == last_baseline) {
+                if (self.layout_buf[scan].baseline_y == last_baseline) {
                     last_on_line_idx = scan;
                 } else {
                     break;
@@ -397,7 +397,7 @@ pub fn hitTest(state: *RendererState, text: []const u8, view_width: f32, click_x
             }
             // Now find closest on that last line
             best_dist = std.math.floatMax(f32);
-            for (state.layout_buf[last_on_line_idx..layout.count]) |cp| {
+            for (self.layout_buf[last_on_line_idx..layout.count]) |cp| {
                 const dl = @abs(click_x - cp.x);
                 const dr = @abs(click_x - (cp.x + cp.advance));
                 if (dl < best_dist) {
@@ -415,7 +415,7 @@ pub fn hitTest(state: *RendererState, text: []const u8, view_width: f32, click_x
     if (best_byte > text.len) best_byte = text.len;
 
     // Reset cursor blink timer so cursor is fully visible after click
-    state.start_time = std.time.nanoTimestamp();
+    self.start_time = std.time.nanoTimestamp();
 
     return @intCast(best_byte);
 }

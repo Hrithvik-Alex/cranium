@@ -1,16 +1,18 @@
-// metal.zig - Metal GPU API layer using ObjC runtime interop
+// Metal.zig - Metal GPU API layer using ObjC runtime interop
 //
 // Provides surface_init, render_frame, hit_test, update_scroll, and surface_deinit
 // exported via C ABI. Uses objc_msgSend to call Metal/AppKit APIs directly from Zig.
-// Pure rendering logic (layout, vertices, scroll) lives in renderer.zig.
+// Pure rendering logic (layout, vertices, scroll) lives in Renderer.zig.
 
 const std = @import("std");
-const renderer = @import("renderer.zig");
+const Renderer = @import("Renderer.zig");
 const CoreTextGlyphAtlas = @import("CoreTextGlyphAtlas.zig");
 
-// Re-use types from renderer
-const GlyphVertex = renderer.GlyphVertex;
-const CursorVertex = renderer.CursorVertex;
+const Self = @This();
+
+// Re-use types from Renderer
+const GlyphVertex = Renderer.GlyphVertex;
+const CursorVertex = Renderer.CursorVertex;
 
 // ============================================================================
 // Objective-C Runtime
@@ -137,37 +139,35 @@ const CursorPipeline = struct {
 };
 
 // ============================================================================
-// Renderer
+// Struct Fields
 // ============================================================================
 
-pub const Renderer = struct {
-    state: renderer.RendererState,
-    device: Id,
-    command_queue: Id,
-    view: Id,
-    glyph: GlyphPipeline,
-    cursor: CursorPipeline,
+state: Renderer,
+device: Id,
+command_queue: Id,
+view: Id,
+glyph: GlyphPipeline,
+cursor: CursorPipeline,
 
-    fn ensureVertexCapacity(self: *Renderer, required_chars: usize) bool {
-        if (required_chars <= self.glyph.char_capacity) return true;
+fn ensureVertexCapacity(self: *Self, required_chars: usize) bool {
+    if (required_chars <= self.glyph.char_capacity) return true;
 
-        var new_capacity = self.glyph.char_capacity;
-        while (new_capacity < required_chars) {
-            new_capacity *= 2;
-        }
-
-        const new_size = new_capacity * renderer.VERTICES_PER_CHAR * @sizeOf(GlyphVertex);
-        const new_buffer = msgSend(OptId, self.device, sel_("newBufferWithLength:options:"), .{
-            @as(c_ulong, new_size),
-            @as(c_ulong, 0),
-        }) orelse return false;
-
-        release(self.glyph.vertex_buffer);
-        self.glyph.vertex_buffer = new_buffer;
-        self.glyph.char_capacity = new_capacity;
-        return true;
+    var new_capacity = self.glyph.char_capacity;
+    while (new_capacity < required_chars) {
+        new_capacity *= 2;
     }
-};
+
+    const new_size = new_capacity * Renderer.VERTICES_PER_CHAR * @sizeOf(GlyphVertex);
+    const new_buffer = msgSend(OptId, self.device, sel_("newBufferWithLength:options:"), .{
+        @as(c_ulong, new_size),
+        @as(c_ulong, 0),
+    }) orelse return false;
+
+    release(self.glyph.vertex_buffer);
+    self.glyph.vertex_buffer = new_buffer;
+    self.glyph.char_capacity = new_capacity;
+    return true;
+}
 
 // ============================================================================
 // Shader Pipeline Compilation
@@ -254,7 +254,7 @@ fn setFragmentBytes(encoder: Id, bytes: *const anyopaque, length: c_ulong, index
 // Init / Render / HitTest / Deinit
 // ============================================================================
 
-pub fn initImpl(view: Id) !*Renderer {
+pub fn init(view: Id) !*Self {
     // 1. Create Metal device
     const device = MTLCreateSystemDefaultDevice() orelse return error.NoMetalDevice;
 
@@ -262,9 +262,9 @@ pub fn initImpl(view: Id) !*Renderer {
     msgSend(void, view, sel_("setDevice:"), .{device});
     msgSend(void, view, sel_("setColorPixelFormat:"), .{MTLPixelFormatBGRA8Unorm});
     msgSend(void, view, sel_("setClearColor:"), .{MTLClearColor{
-        .red = renderer.BACKGROUND_R,
-        .green = renderer.BACKGROUND_G,
-        .blue = renderer.BACKGROUND_B,
+        .red = Renderer.BACKGROUND_R,
+        .green = Renderer.BACKGROUND_G,
+        .blue = Renderer.BACKGROUND_B,
         .alpha = 1.0,
     }});
 
@@ -275,7 +275,7 @@ pub fn initImpl(view: Id) !*Renderer {
     var atlas = CoreTextGlyphAtlas.rasterize_atlas(
         std.heap.page_allocator,
         48.0,
-        renderer.font_data,
+        Renderer.font_data,
     ) catch return error.GlyphRasterFailed;
 
     // 5. Create Metal texture from atlas bitmap
@@ -321,30 +321,30 @@ pub fn initImpl(view: Id) !*Renderer {
     const cursor_pipeline_state = try compileShaderPipeline(device, cursor_shader_source, "cursor_vertex_main", "cursor_fragment_main");
 
     // 8. Create persistent vertex buffer for text
-    const initial_buf_size = renderer.INITIAL_TEXT_CAPACITY * renderer.VERTICES_PER_CHAR * @sizeOf(GlyphVertex);
+    const initial_buf_size = Renderer.INITIAL_TEXT_CAPACITY * Renderer.VERTICES_PER_CHAR * @sizeOf(GlyphVertex);
     const glyph_vertex_buffer = msgSend(OptId, device, sel_("newBufferWithLength:options:"), .{
         @as(c_ulong, initial_buf_size),
         @as(c_ulong, 0),
     }) orelse return error.BufferFailed;
 
     // 9. Create cursor vertex buffer (6 vertices * 8 bytes = 48 bytes)
-    const cursor_buf_size = renderer.CURSOR_VERTICES * @sizeOf(CursorVertex);
+    const cursor_buf_size = Renderer.CURSOR_VERTICES * @sizeOf(CursorVertex);
     const cursor_vertex_buffer = msgSend(OptId, device, sel_("newBufferWithLength:options:"), .{
         @as(c_ulong, cursor_buf_size),
         @as(c_ulong, 0),
     }) orelse return error.BufferFailed;
 
     // 10. Allocate layout buffer
-    const layout_buf = try std.heap.page_allocator.alloc(renderer.CharPos, renderer.INITIAL_TEXT_CAPACITY);
+    const layout_buf = try std.heap.page_allocator.alloc(Renderer.CharPos, Renderer.INITIAL_TEXT_CAPACITY);
 
-    // 11. Allocate and return renderer
-    const r = try std.heap.page_allocator.create(Renderer);
-    r.* = .{
+    // 11. Allocate and return Metal instance
+    const self = try std.heap.page_allocator.create(Self);
+    self.* = .{
         .state = .{
             .atlas = atlas,
             .start_time = std.time.nanoTimestamp(),
             .layout_buf = layout_buf,
-            .layout_result = .{ .count = 0, .final_x = renderer.MARGIN, .final_baseline_y = renderer.MARGIN },
+            .layout_result = .{ .count = 0, .final_x = Renderer.MARGIN, .final_baseline_y = Renderer.MARGIN },
             .layout_text_len = 0,
             .scroll_y = 0,
             .last_view_height = 0,
@@ -358,7 +358,7 @@ pub fn initImpl(view: Id) !*Renderer {
             .vertex_buffer = glyph_vertex_buffer,
             .texture = texture,
             .sampler = sampler,
-            .char_capacity = renderer.INITIAL_TEXT_CAPACITY,
+            .char_capacity = Renderer.INITIAL_TEXT_CAPACITY,
         },
         .cursor = .{
             .pipeline_state = cursor_pipeline_state,
@@ -366,68 +366,68 @@ pub fn initImpl(view: Id) !*Renderer {
         },
     };
 
-    return r;
+    return self;
 }
 
-pub fn renderImpl(r: *Renderer, text: []const u8, view_width: f32, view_height: f32, cursor_byte_offset: i32) void {
+pub fn render(self: *Self, text: []const u8, view_width: f32, view_height: f32, cursor_byte_offset: i32) void {
     if (view_width <= 0 or view_height <= 0) return;
 
-    r.state.last_view_height = view_height;
+    self.state.last_view_height = view_height;
 
     const pool = objc_autoreleasePoolPush() orelse return;
     defer objc_autoreleasePoolPop(pool);
 
     // Ensure buffers are large enough
     const needed = if (text.len > 0) text.len else 1;
-    if (!r.ensureVertexCapacity(needed)) return;
-    if (!r.state.ensureLayoutCapacity(needed)) return;
+    if (!self.ensureVertexCapacity(needed)) return;
+    if (!self.state.ensureLayoutCapacity(needed)) return;
 
     // Run shared layout and cache results
-    r.state.layout_result = renderer.layoutText(&r.state.atlas, text, view_width, r.state.layout_buf);
-    r.state.layout_text_len = text.len;
+    self.state.layout_result = self.state.layoutText(text, view_width, self.state.layout_buf);
+    self.state.layout_text_len = text.len;
 
     // Build vertex data from layout positions
-    const max_vertices = r.glyph.char_capacity * renderer.VERTICES_PER_CHAR;
-    const buf_ptr = msgSend(*anyopaque, r.glyph.vertex_buffer, sel_("contents"), .{});
+    const max_vertices = self.glyph.char_capacity * Renderer.VERTICES_PER_CHAR;
+    const buf_ptr = msgSend(*anyopaque, self.glyph.vertex_buffer, sel_("contents"), .{});
     const vertices: [*]GlyphVertex = @ptrCast(@alignCast(buf_ptr));
-    const vertex_count = renderer.buildGlyphVertices(&r.state, text, vertices, max_vertices);
+    const vertex_count = self.state.buildGlyphVertices(text, vertices, max_vertices);
 
     // Resolve cursor position
-    const cursor_info = renderer.resolveCursorPos(&r.state, cursor_byte_offset, text);
+    const cursor_info = self.state.resolveCursorPos(cursor_byte_offset, text);
 
     // Auto-scroll when cursor moves
-    renderer.autoScroll(&r.state, cursor_info, cursor_byte_offset, view_height);
-    r.state.last_cursor_byte_offset = cursor_byte_offset;
+    self.state.autoScroll(cursor_info, cursor_byte_offset, view_height);
+    self.state.last_cursor_byte_offset = cursor_byte_offset;
 
     // --- Metal draw calls below ---
 
     // Get current render pass descriptor and drawable from MTKView
-    const rpd = msgSend(OptId, r.view, sel_("currentRenderPassDescriptor"), .{}) orelse return;
-    const drawable = msgSend(OptId, r.view, sel_("currentDrawable"), .{}) orelse return;
+    const rpd = msgSend(OptId, self.view, sel_("currentRenderPassDescriptor"), .{}) orelse return;
+    const drawable = msgSend(OptId, self.view, sel_("currentDrawable"), .{}) orelse return;
 
     // Create command buffer
-    const cmd_buffer = msgSend(OptId, r.command_queue, sel_("commandBuffer"), .{}) orelse return;
+    const cmd_buffer = msgSend(OptId, self.command_queue, sel_("commandBuffer"), .{}) orelse return;
 
     // Create render command encoder
     const encoder = msgSend(OptId, cmd_buffer, sel_("renderCommandEncoderWithDescriptor:"), .{rpd}) orelse return;
 
     // Uniforms for shaders
     const viewport = [2]f32{ view_width, view_height };
-    const text_color = [4]f32{ renderer.TEXT_R, renderer.TEXT_G, renderer.TEXT_B, 1.0 };
+    const text_color = [4]f32{ Renderer.TEXT_R, Renderer.TEXT_G, Renderer.TEXT_B, 1.0 };
 
     // Draw text glyphs (only if we have vertices)
     if (vertex_count > 0) {
-        msgSend(void, encoder, sel_("setRenderPipelineState:"), .{r.glyph.pipeline_state});
-        msgSend(void, encoder, sel_("setFragmentTexture:atIndex:"), .{ r.glyph.texture, @as(c_ulong, 0) });
-        msgSend(void, encoder, sel_("setFragmentSamplerState:atIndex:"), .{ r.glyph.sampler, @as(c_ulong, 0) });
+        msgSend(void, encoder, sel_("setRenderPipelineState:"), .{self.glyph.pipeline_state});
+        msgSend(void, encoder, sel_("setFragmentTexture:atIndex:"), .{ self.glyph.texture, @as(c_ulong, 0) });
+        msgSend(void, encoder, sel_("setFragmentSamplerState:atIndex:"), .{ self.glyph.sampler, @as(c_ulong, 0) });
         setFragmentBytes(encoder, @ptrCast(&text_color), @sizeOf([4]f32), 1);
         msgSend(void, encoder, sel_("setVertexBuffer:offset:atIndex:"), .{
-            r.glyph.vertex_buffer,
+            self.glyph.vertex_buffer,
             @as(c_ulong, 0),
             @as(c_ulong, 0),
         });
         setVertexBytes(encoder, @ptrCast(&viewport), @sizeOf([2]f32), 1);
-        setVertexBytes(encoder, @ptrCast(&r.state.scroll_y), @sizeOf(f32), 2);
+        setVertexBytes(encoder, @ptrCast(&self.state.scroll_y), @sizeOf(f32), 2);
         msgSend(void, encoder, sel_("drawPrimitives:vertexStart:vertexCount:"), .{
             MTLPrimitiveTypeTriangle,
             @as(c_ulong, 0),
@@ -437,29 +437,29 @@ pub fn renderImpl(r: *Renderer, text: []const u8, view_width: f32, view_height: 
 
     // Draw cursor if visible
     const has_cursor = cursor_byte_offset >= 0;
-    if (has_cursor and renderer.isCursorVisible(&r.state, cursor_info, view_height)) {
-        const opacity = renderer.cursorOpacity(&r.state);
+    if (has_cursor and self.state.isCursorVisible(cursor_info, view_height)) {
+        const opacity = self.state.cursorOpacity();
 
         // Write cursor vertices into Metal buffer
-        const cbuf_ptr = msgSend(*anyopaque, r.cursor.vertex_buffer, sel_("contents"), .{});
+        const cbuf_ptr = msgSend(*anyopaque, self.cursor.vertex_buffer, sel_("contents"), .{});
         const cursor_verts: [*]CursorVertex = @ptrCast(@alignCast(cbuf_ptr));
-        renderer.buildCursorVertices(&r.state, cursor_info, cursor_verts);
+        self.state.buildCursorVertices(cursor_info, cursor_verts);
 
         // Switch to cursor pipeline and draw
-        msgSend(void, encoder, sel_("setRenderPipelineState:"), .{r.cursor.pipeline_state});
+        msgSend(void, encoder, sel_("setRenderPipelineState:"), .{self.cursor.pipeline_state});
         msgSend(void, encoder, sel_("setVertexBuffer:offset:atIndex:"), .{
-            r.cursor.vertex_buffer,
+            self.cursor.vertex_buffer,
             @as(c_ulong, 0),
             @as(c_ulong, 0),
         });
         setVertexBytes(encoder, @ptrCast(&viewport), @sizeOf([2]f32), 1);
-        setVertexBytes(encoder, @ptrCast(&r.state.scroll_y), @sizeOf(f32), 2);
+        setVertexBytes(encoder, @ptrCast(&self.state.scroll_y), @sizeOf(f32), 2);
         setFragmentBytes(encoder, @ptrCast(&opacity), @sizeOf(f32), 0);
         setFragmentBytes(encoder, @ptrCast(&text_color), @sizeOf([4]f32), 1);
         msgSend(void, encoder, sel_("drawPrimitives:vertexStart:vertexCount:"), .{
             MTLPrimitiveTypeTriangle,
             @as(c_ulong, 0),
-            @as(c_ulong, renderer.CURSOR_VERTICES),
+            @as(c_ulong, Renderer.CURSOR_VERTICES),
         });
     }
 
@@ -471,26 +471,25 @@ pub fn renderImpl(r: *Renderer, text: []const u8, view_width: f32, view_height: 
     msgSend(void, cmd_buffer, sel_("commit"), .{});
 }
 
-pub fn hitTestImpl(r: *Renderer, text: []const u8, view_width: f32, click_x: f32, click_y: f32) i32 {
-    return renderer.hitTest(&r.state, text, view_width, click_x, click_y);
+pub fn hitTest(self: *Self, text: []const u8, view_width: f32, click_x: f32, click_y: f32) i32 {
+    return self.state.hitTest(text, view_width, click_x, click_y);
 }
 
-pub fn updateScrollImpl(r: *Renderer, delta_y: f32) void {
-    renderer.updateScroll(&r.state, delta_y);
+pub fn updateScroll(self: *Self, delta_y: f32) void {
+    self.state.updateScroll(delta_y);
 }
 
-pub fn deinitImpl(r: *Renderer) void {
-    release(r.cursor.pipeline_state);
-    release(r.cursor.vertex_buffer);
-    release(r.glyph.pipeline_state);
-    release(r.glyph.texture);
-    release(r.glyph.sampler);
-    release(r.glyph.vertex_buffer);
-    release(r.command_queue);
-    release(r.device);
-    if (r.state.layout_buf.len > 0) {
-        std.heap.page_allocator.free(r.state.layout_buf);
+pub fn deinit(self: *Self) void {
+    release(self.cursor.pipeline_state);
+    release(self.cursor.vertex_buffer);
+    release(self.glyph.pipeline_state);
+    release(self.glyph.texture);
+    release(self.glyph.sampler);
+    release(self.glyph.vertex_buffer);
+    release(self.command_queue);
+    release(self.device);
+    if (self.state.layout_buf.len > 0) {
+        std.heap.page_allocator.free(self.state.layout_buf);
     }
-    std.heap.page_allocator.destroy(r);
+    std.heap.page_allocator.destroy(self);
 }
-
