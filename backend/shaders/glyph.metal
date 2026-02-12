@@ -27,7 +27,8 @@ vertex VertexOut glyph_vertex_main(uint vid [[vertex_id]],
 
 fragment float4 glyph_fragment_main(VertexOut in [[stage_in]],
                                texture2d<float> tex [[texture(0)]],
-                               sampler smp [[sampler(0)]]) {
+                               sampler smp [[sampler(0)]],
+                               constant float4 &text_color [[buffer(1)]]) {
     float alpha = tex.sample(smp, in.texcoord).r;
-    return float4(1.0, 1.0, 1.0, alpha);
+    return float4(text_color.rgb, alpha);
 }

@@ -23,6 +23,7 @@ vertex CursorVertexOut cursor_vertex_main(uint vid [[vertex_id]],
 }
 
 fragment float4 cursor_fragment_main(CursorVertexOut in [[stage_in]],
-                                      constant float &opacity [[buffer(0)]]) {
-    return float4(1.0, 1.0, 1.0, opacity);
+                                      constant float &opacity [[buffer(0)]],
+                                      constant float4 &text_color [[buffer(1)]]) {
+    return float4(text_color.rgb, opacity);
 }

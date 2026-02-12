@@ -75,6 +75,28 @@ const MTLBlendFactorSourceAlpha: c_ulong = 4;
 const MTLBlendFactorOneMinusSourceAlpha: c_ulong = 5;
 
 // ============================================================================
+// Theme Colors
+// ============================================================================
+
+const BACKGROUND_R: f64 = 0.157;
+const BACKGROUND_G: f64 = 0.157;
+const BACKGROUND_B: f64 = 0.157;
+const TEXT_R: f32 = 0.878;
+const TEXT_G: f32 = 0.878;
+const TEXT_B: f32 = 0.878;
+
+// ============================================================================
+// MTLClearColor
+// ============================================================================
+
+const MTLClearColor = extern struct {
+    red: f64,
+    green: f64,
+    blue: f64,
+    alpha: f64,
+};
+
+// ============================================================================
 // MTLRegion (for texture upload)
 // ============================================================================
 
@@ -396,6 +418,12 @@ fn initImpl(view: Id) !*Renderer {
     // 2. Configure the MTKView
     msgSend(void, view, sel_("setDevice:"), .{device});
     msgSend(void, view, sel_("setColorPixelFormat:"), .{MTLPixelFormatBGRA8Unorm});
+    msgSend(void, view, sel_("setClearColor:"), .{MTLClearColor{
+        .red = BACKGROUND_R,
+        .green = BACKGROUND_G,
+        .blue = BACKGROUND_B,
+        .alpha = 1.0,
+    }});
 
     // 3. Create command queue
     const queue = msgSend(OptId, device, sel_("newCommandQueue"), .{}) orelse return error.NoCommandQueue;
@@ -614,14 +642,16 @@ fn renderImpl(renderer: *Renderer, text: []const u8, view_width: f32, view_heigh
     // Create render command encoder
     const encoder = msgSend(OptId, cmd_buffer, sel_("renderCommandEncoderWithDescriptor:"), .{rpd}) orelse return;
 
-    // Viewport uniform for shaders
+    // Uniforms for shaders
     const viewport = [2]f32{ view_width, view_height };
+    const text_color = [4]f32{ TEXT_R, TEXT_G, TEXT_B, 1.0 };
 
     // Draw text glyphs (only if we have vertices)
     if (vertex_count > 0) {
         msgSend(void, encoder, sel_("setRenderPipelineState:"), .{renderer.glyph.pipeline_state});
         msgSend(void, encoder, sel_("setFragmentTexture:atIndex:"), .{ renderer.glyph.texture, @as(c_ulong, 0) });
         msgSend(void, encoder, sel_("setFragmentSamplerState:atIndex:"), .{ renderer.glyph.sampler, @as(c_ulong, 0) });
+        setFragmentBytes(encoder, @ptrCast(&text_color), @sizeOf([4]f32), 1);
         msgSend(void, encoder, sel_("setVertexBuffer:offset:atIndex:"), .{
             renderer.glyph.vertex_buffer,
             @as(c_ulong, 0),
@@ -673,6 +703,7 @@ fn renderImpl(renderer: *Renderer, text: []const u8, view_width: f32, view_heigh
         setVertexBytes(encoder, @ptrCast(&viewport), @sizeOf([2]f32), 1);
         setVertexBytes(encoder, @ptrCast(&renderer.scroll_y), @sizeOf(f32), 2);
         setFragmentBytes(encoder, @ptrCast(&opacity), @sizeOf(f32), 0);
+        setFragmentBytes(encoder, @ptrCast(&text_color), @sizeOf([4]f32), 1);
         msgSend(void, encoder, sel_("drawPrimitives:vertexStart:vertexCount:"), .{
             MTLPrimitiveTypeTriangle,
             @as(c_ulong, 0),
