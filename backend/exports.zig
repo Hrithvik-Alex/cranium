@@ -1,14 +1,15 @@
+// exports.zig - All C ABI exports for Swift consumption
+//
+// This is the root source file for the static library. All export functions
+// that are declared in cranium.h live here.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const md_parser = @import("md_parser.zig");
 const font = @import("font.zig");
 const edit_session = @import("edit_session.zig");
-
-// Import metal module to ensure its export fn symbols are included in the static library
-comptime {
-    _ = @import("metal.zig");
-}
+const metal = @import("metal.zig");
 
 const EditSession = edit_session.EditSession;
 
@@ -124,6 +125,10 @@ pub fn toCBlock(allocator: Allocator, blk: *Block, id_counter: *usize) !*CBlock 
     return c_block;
 }
 
+// ============================================================================
+// Document Exports
+// ============================================================================
+
 /// Internal implementation that uses Zig error handling
 fn openDocumentImpl(filename_slice: []const u8) !*CDocument {
     const page_alloc = std.heap.page_allocator;
@@ -159,65 +164,28 @@ fn openDocumentImpl(filename_slice: []const u8) !*CDocument {
     return doc;
 }
 
-/// Open and parse a markdown file, returning a document handle.
-///
-/// Each document owns its own arena allocator. All memory for the document
-/// (CBlocks, file buffer, etc.) is allocated from this arena. When closeDocument()
-/// is called, the entire arena is freed at once - no need for individual frees.
-///
-/// Parameters:
-///   filename: Null-terminated C string containing the absolute path to the markdown file.
-///
-/// Returns:
-///   Pointer to a CDocument handle on success, or null on error.
-///   The caller is responsible for calling closeDocument() to free resources.
 export fn openDocument(filename: [*:0]const u8) callconv(.c) ?*CDocument {
     return openDocumentImpl(std.mem.span(filename)) catch null;
 }
 
-/// Close a document and free all associated resources.
-///
-/// This deinits the document's arena allocator, which frees all memory
-/// (CBlocks, file buffer, the document handle itself) in one operation.
-///
-/// Parameters:
-///   doc: Pointer to the CDocument to close. May be null (no-op).
-///
-/// After calling this function, the document pointer and all CBlock pointers
-/// derived from it are invalid and must not be used.
 export fn closeDocument(doc: ?*CDocument) callconv(.c) void {
     const d = doc orelse return;
     const page_alloc = std.heap.page_allocator;
 
-    // Get the arena from the opaque pointer
     const arena: *std.heap.ArenaAllocator = @ptrCast(@alignCast(d.arena_ptr orelse return));
-
-    // Deinit the arena - this frees ALL memory allocated for this document
-    // (CBlocks, file buffer, the CDocument struct itself, everything)
     arena.deinit();
-
-    // Free the arena struct itself (which was allocated from page_allocator)
     page_alloc.destroy(arena);
 }
 
-/// Create a new empty file at the specified path.
-///
-/// Parameters:
-///   filename: Null-terminated C string containing the absolute path for the new file.
-///
-/// Returns:
-///   0 on success, -1 on error.
 export fn createFile(filename: [*:0]const u8) callconv(.c) c_int {
     const filename_slice = std.mem.span(filename);
-
     const file = std.fs.createFileAbsolute(filename_slice, .{}) catch return -1;
     file.close();
-
     return 0;
 }
 
 // ============================================================================
-// Edit Session C Interop
+// Edit Session Exports
 // ============================================================================
 
 export fn createEditSession(filename: [*:0]const u8) callconv(.c) ?*CEditSession {
@@ -271,6 +239,8 @@ export fn handleKeyEvent(session_ptr: ?*CEditSession, key_code: u16, modifiers: 
     }
 
     switch (key_code) {
+        36 => edit_session.insertText(session, "\n") catch return,
+        48 => edit_session.insertText(session, "    ") catch return,
         51 => edit_session.deleteBackward(session) catch return,
         117 => edit_session.deleteForward(session) catch return,
         123 => edit_session.moveCursorLeft(session),
@@ -287,4 +257,54 @@ export fn setCursorByteOffset(session_ptr: ?*CEditSession, byte_offset: usize) c
     const session: *EditSession = @ptrCast(@alignCast(c_session.session_ptr orelse return));
     edit_session.setCursorOffset(session, byte_offset);
     c_session.sync();
+}
+
+// ============================================================================
+// Metal Surface Exports
+// ============================================================================
+
+export fn surface_init(view: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const v = view orelse return null;
+    const r = metal.initImpl(v) catch return null;
+    return @ptrCast(r);
+}
+
+export fn render_frame(
+    renderer_ptr: ?*anyopaque,
+    text_ptr: ?[*]const u8,
+    text_len: c_int,
+    view_width: f32,
+    view_height: f32,
+    cursor_byte_offset: c_int,
+) callconv(.c) void {
+    const ptr = renderer_ptr orelse return;
+    const r: *metal.Renderer = @ptrCast(@alignCast(ptr));
+    const text: []const u8 = if (text_ptr) |t| (if (text_len > 0) t[0..@intCast(text_len)] else "") else "";
+    metal.renderImpl(r, text, view_width, view_height, cursor_byte_offset);
+}
+
+export fn hit_test(
+    renderer_ptr: ?*anyopaque,
+    text_ptr: ?[*]const u8,
+    text_len: c_int,
+    view_width: f32,
+    click_x: f32,
+    click_y: f32,
+) callconv(.c) c_int {
+    const ptr = renderer_ptr orelse return 0;
+    const r: *metal.Renderer = @ptrCast(@alignCast(ptr));
+    const text: []const u8 = if (text_ptr) |t| (if (text_len > 0) t[0..@intCast(text_len)] else "") else "";
+    return metal.hitTestImpl(r, text, view_width, click_x, click_y);
+}
+
+export fn update_scroll(renderer_ptr: ?*anyopaque, delta_y: f32) callconv(.c) void {
+    const ptr = renderer_ptr orelse return;
+    const r: *metal.Renderer = @ptrCast(@alignCast(ptr));
+    metal.updateScrollImpl(r, delta_y);
+}
+
+export fn surface_deinit(renderer_ptr: ?*anyopaque) callconv(.c) void {
+    const ptr = renderer_ptr orelse return;
+    const r: *metal.Renderer = @ptrCast(@alignCast(ptr));
+    metal.deinitImpl(r);
 }

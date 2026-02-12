@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
         .name = "cranium",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("backend/md_file_interop.zig"),
+            .root_source_file = b.path("backend/exports.zig"),
             .target = macos_aarch64_target,
             .optimize = optimize,
         }),
@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
         .name = "cranium_x86_64",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("backend/md_file_interop.zig"),
+            .root_source_file = b.path("backend/exports.zig"),
             .target = macos_x86_64_target,
             .optimize = optimize,
         }),

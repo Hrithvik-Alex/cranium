@@ -259,15 +259,7 @@ final class EditorTextView: NSTextView {
     }
 
     override func doCommand(by selector: Selector) {
-        if selector == #selector(insertNewline(_:)) {
-            onInsertText?("\n")
-            return
-        }
-        if selector == #selector(insertTab(_:)) {
-            onInsertText?("    ")
-            return
-        }
-        // Swallow other default text system commands; Zig handles them.
+        // Swallow default text system commands; Zig handles them via handleKeyEvent.
     }
 
     override func mouseDown(with event: NSEvent) {
