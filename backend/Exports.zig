@@ -276,6 +276,13 @@ export fn setCursorByteOffset(session_ptr: ?*CEditSession, byte_offset: usize) c
     c_session.sync();
 }
 
+export fn deleteTextRange(session_ptr: ?*CEditSession, start_offset: usize, end_offset: usize) callconv(.c) void {
+    const c_session = session_ptr orelse return;
+    const session: *EditSession = @ptrCast(@alignCast(c_session.session_ptr orelse return));
+    session.deleteTextRange(start_offset, end_offset) catch return;
+    c_session.sync();
+}
+
 // ============================================================================
 // Metal Surface Exports
 // ============================================================================
@@ -293,11 +300,20 @@ export fn render_frame(
     view_width: f32,
     view_height: f32,
     cursor_byte_offset: c_int,
+    selection_start_byte_offset: c_int,
+    selection_end_byte_offset: c_int,
 ) callconv(.c) void {
     const ptr = renderer_ptr orelse return;
     const r: *Metal = @ptrCast(@alignCast(ptr));
     const text: []const u8 = if (text_ptr) |t| (if (text_len > 0) t[0..@intCast(text_len)] else "") else "";
-    r.render(text, view_width, view_height, cursor_byte_offset);
+    r.render(
+        text,
+        view_width,
+        view_height,
+        cursor_byte_offset,
+        selection_start_byte_offset,
+        selection_end_byte_offset,
+    );
 }
 
 export fn hit_test(

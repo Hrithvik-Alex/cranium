@@ -397,6 +397,20 @@ pub fn setCursorOffset(self: *Self, offset: usize) void {
     self.updateCursor(@min(offset, self.editor.size));
 }
 
+pub fn deleteTextRange(self: *Self, start_offset: usize, end_offset: usize) !void {
+    const start = @min(start_offset, self.editor.size);
+    const end = @min(end_offset, self.editor.size);
+
+    if (end <= start) {
+        self.updateCursor(start);
+        return;
+    }
+
+    try self.editor.delete_range(start, end);
+    self.cursor.byte_offset = start;
+    try self.reparse();
+}
+
 pub fn saveFile(self: *Self) !void {
     const file = try std.fs.createFileAbsolute(self.file_path, .{ .truncate = true });
     defer file.close();

@@ -193,6 +193,16 @@ void handleKeyEvent(CEditSession *session, uint16_t key_code, uint64_t modifiers
  */
 void setCursorByteOffset(CEditSession *session, size_t byte_offset);
 
+/**
+ * Delete text in the half-open byte range [start_offset, end_offset).
+ * If start_offset >= end_offset after clamping, this becomes a cursor move.
+ *
+ * @param session Pointer to the CEditSession.
+ * @param start_offset Start byte offset (inclusive).
+ * @param end_offset End byte offset (exclusive).
+ */
+void deleteTextRange(CEditSession *session, size_t start_offset, size_t end_offset);
+
 // ============================================================================
 // Metal Renderer
 // ============================================================================
@@ -216,7 +226,15 @@ void *surface_init(void *mtk_view);
  * @param view_width Drawable width in pixels.
  * @param view_height Drawable height in pixels.
  */
-void render_frame(void *renderer, const char *text, int text_len, float view_width, float view_height, int cursor_byte_offset);
+void render_frame(
+    void *renderer,
+    const char *text,
+    int text_len,
+    float view_width,
+    float view_height,
+    int cursor_byte_offset,
+    int selection_start_byte_offset,
+    int selection_end_byte_offset);
 
 /**
  * Hit-test a click point against the renderer's text layout.

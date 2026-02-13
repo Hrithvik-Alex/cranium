@@ -49,6 +49,20 @@ class FileViewModel {
 
     /// Current cursor byte offset from Zig
     var cursorByteOffset: Int = 0
+    private var selectionAnchorByteOffset: Int?
+    private var selectionFocusByteOffset: Int?
+
+    var selectionStartByteOffset: Int {
+        normalizedSelectionRange?.lowerBound ?? -1
+    }
+
+    var selectionEndByteOffset: Int {
+        normalizedSelectionRange?.upperBound ?? -1
+    }
+
+    var hasSelection: Bool {
+        normalizedSelectionRange != nil
+    }
     
     /// Open and parse a markdown file
     /// - Parameter filePath: Absolute path to the markdown file
@@ -83,6 +97,7 @@ class FileViewModel {
             errorMessage = "Failed to open editor session"
         } else {
             refreshText()
+            clearSelection()
         }
     }
     
@@ -93,6 +108,8 @@ class FileViewModel {
             editSession = nil
         }
         currentText = ""
+        cursorByteOffset = 0
+        clearSelection()
         errorMessage = nil
     }
     
@@ -121,8 +138,72 @@ class FileViewModel {
 
     func sendCursorByteOffset(_ offset: Int) {
         guard let session = editSession else { return }
-        setCursorByteOffset(session, offset)
+        setCursorByteOffset(session, clampedOffset(offset))
         cursorByteOffset = Int(session.pointee.cursor_byte_offset)
+    }
+
+    func beginSelection(at offset: Int) {
+        let clamped = clampedOffset(offset)
+        selectionAnchorByteOffset = clamped
+        selectionFocusByteOffset = clamped
+        sendCursorByteOffset(clamped)
+    }
+
+    func updateSelection(to offset: Int) {
+        let clamped = clampedOffset(offset)
+        if selectionAnchorByteOffset == nil {
+            selectionAnchorByteOffset = cursorByteOffset
+        }
+        selectionFocusByteOffset = clamped
+        sendCursorByteOffset(clamped)
+    }
+
+    func finalizeSelection() {
+        if normalizedSelectionRange == nil {
+            clearSelection()
+        }
+    }
+
+    func clearSelection() {
+        selectionAnchorByteOffset = nil
+        selectionFocusByteOffset = nil
+    }
+
+    func insertTextAtCursor(_ text: String) {
+        if hasSelection {
+            _ = deleteSelection()
+        }
+        sendInsertText(text)
+    }
+
+    @discardableResult
+    func deleteSelection() -> Bool {
+        guard let session = editSession,
+              let range = normalizedSelectionRange else {
+            return false
+        }
+        deleteTextRange(session, range.lowerBound, range.upperBound)
+        refreshText()
+        clearSelection()
+        return true
+    }
+
+    func copySelectionToPasteboard() {
+        guard let selectedText = selectedTextInSelection() else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(selectedText, forType: .string)
+    }
+
+    func cutSelectionToPasteboard() {
+        guard hasSelection else { return }
+        copySelectionToPasteboard()
+        _ = deleteSelection()
+    }
+
+    func pasteFromPasteboard() {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        insertTextAtCursor(text)
     }
 
     private func refreshText() {
@@ -131,12 +212,59 @@ class FileViewModel {
         guard let ptr = session.pointee.text_ptr, length > 0 else {
             currentText = ""
             cursorByteOffset = 0
+            clearSelection()
             return
         }
         let uint8Ptr = UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self)
         let buffer = UnsafeBufferPointer(start: uint8Ptr, count: Int(length))
         currentText = String(decoding: buffer, as: UTF8.self)
         cursorByteOffset = Int(session.pointee.cursor_byte_offset)
+        clampSelectionToTextLength()
+    }
+
+    private func clampedOffset(_ offset: Int) -> Int {
+        max(0, min(offset, currentText.utf8.count))
+    }
+
+    private var normalizedSelectionRange: Range<Int>? {
+        guard let anchor = selectionAnchorByteOffset,
+              let focus = selectionFocusByteOffset else {
+            return nil
+        }
+        let lower = clampedOffset(min(anchor, focus))
+        let upper = clampedOffset(max(anchor, focus))
+        guard lower < upper else { return nil }
+        return lower..<upper
+    }
+
+    private func clampSelectionToTextLength() {
+        if let anchor = selectionAnchorByteOffset {
+            selectionAnchorByteOffset = clampedOffset(anchor)
+        }
+        if let focus = selectionFocusByteOffset {
+            selectionFocusByteOffset = clampedOffset(focus)
+        }
+        if normalizedSelectionRange == nil {
+            clearSelection()
+        }
+    }
+
+    private func selectedTextInSelection() -> String? {
+        guard let range = normalizedSelectionRange,
+              let session = editSession,
+              let textPtr = session.pointee.text_ptr else {
+            return nil
+        }
+
+        let textLen = Int(session.pointee.text_len)
+        let lower = max(0, min(range.lowerBound, textLen))
+        let upper = max(0, min(range.upperBound, textLen))
+        guard upper > lower else { return nil }
+
+        let uint8Ptr = UnsafeRawPointer(textPtr).assumingMemoryBound(to: UInt8.self)
+        let selectedPtr = uint8Ptr.advanced(by: lower)
+        let buffer = UnsafeBufferPointer(start: selectedPtr, count: upper - lower)
+        return String(decoding: buffer, as: UTF8.self)
     }
 }
 
@@ -238,6 +366,8 @@ final class EditorTextView: NSTextView {
     var onKeyEvent: ((NSEvent) -> Void)?
     var onInsertText: ((String) -> Void)?
     var onMouseDown: ((NSPoint) -> Void)?
+    var onMouseDragged: ((NSPoint) -> Void)?
+    var onMouseUp: ((NSPoint) -> Void)?
     var onScrollWheel: ((NSEvent) -> Void)?
 
     override var acceptsFirstResponder: Bool {
@@ -267,6 +397,16 @@ final class EditorTextView: NSTextView {
         onMouseDown?(point)
     }
 
+    override func mouseDragged(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        onMouseDragged?(point)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        onMouseUp?(point)
+    }
+
     override func scrollWheel(with event: NSEvent) {
         if let onScrollWheel = onScrollWheel {
             onScrollWheel(event)
@@ -282,6 +422,8 @@ struct EditorInputView: NSViewRepresentable {
     var onKeyEvent: (NSEvent) -> Void
     var onInsertText: (String) -> Void
     var onMouseDown: (NSPoint, NSView) -> Void
+    var onMouseDragged: (NSPoint, NSView) -> Void
+    var onMouseUp: (NSPoint, NSView) -> Void
     var onScrollWheel: ((NSEvent) -> Void)?
 
     func makeNSView(context: Context) -> NSView {
@@ -306,6 +448,12 @@ struct EditorInputView: NSViewRepresentable {
         textView.onInsertText = onInsertText
         textView.onMouseDown = { point in
             onMouseDown(point, textView)
+        }
+        textView.onMouseDragged = { point in
+            onMouseDragged(point, textView)
+        }
+        textView.onMouseUp = { point in
+            onMouseUp(point, textView)
         }
         textView.onScrollWheel = onScrollWheel
 
@@ -384,6 +532,8 @@ struct FileView: View {
                     MetalSurfaceView(
                         text: viewModel.currentText,
                         cursorByteOffset: viewModel.cursorByteOffset,
+                        selectionStartByteOffset: viewModel.selectionStartByteOffset,
+                        selectionEndByteOffset: viewModel.selectionEndByteOffset,
                         onRendererReady: { renderer, metalView in
                             viewModel.rendererPtr = renderer
                             viewModel.metalView = metalView
@@ -400,7 +550,13 @@ struct FileView: View {
                             handleInsertText(viewModel: viewModel, text: text)
                         },
                         onMouseDown: { point, sourceView in
-                            handleMouseClick(viewModel: viewModel, point: point, in: sourceView)
+                            handleMouseDown(viewModel: viewModel, point: point, in: sourceView)
+                        },
+                        onMouseDragged: { point, sourceView in
+                            handleMouseDrag(viewModel: viewModel, point: point, in: sourceView)
+                        },
+                        onMouseUp: { point, sourceView in
+                            handleMouseUp(viewModel: viewModel, point: point, in: sourceView)
                         },
                         onScrollWheel: { event in
                             handleScrollWheel(viewModel: viewModel, event: event)
@@ -453,11 +609,39 @@ struct FileView: View {
     }
 
     private func handleKeyEvent(viewModel: FileViewModel, event: NSEvent) {
+        let isCommandDown = event.modifierFlags.contains(.command)
+        if isCommandDown {
+            if let key = event.charactersIgnoringModifiers?.lowercased() {
+                switch key {
+                case "c":
+                    viewModel.copySelectionToPasteboard()
+                    return
+                case "x":
+                    viewModel.cutSelectionToPasteboard()
+                    return
+                case "v":
+                    viewModel.pasteFromPasteboard()
+                    return
+                default:
+                    break
+                }
+            }
+        }
+
+        // Backspace / forward-delete remove the selection as a range.
+        if (event.keyCode == 51 || event.keyCode == 117), viewModel.hasSelection {
+            _ = viewModel.deleteSelection()
+            return
+        }
+
         viewModel.sendKeyEvent(event)
+        if event.keyCode == 123 || event.keyCode == 124 || event.keyCode == 125 || event.keyCode == 126 {
+            viewModel.clearSelection()
+        }
     }
 
     private func handleInsertText(viewModel: FileViewModel, text: String) {
-        viewModel.sendInsertText(text)
+        viewModel.insertTextAtCursor(text)
     }
 
     private func handleScrollWheel(viewModel: FileViewModel, event: NSEvent) {
@@ -470,14 +654,27 @@ struct FileView: View {
         update_scroll(renderer, scaledDelta)
     }
 
-    private func handleMouseClick(viewModel: FileViewModel, point: NSPoint, in sourceView: NSView) {
+    private func handleMouseDown(viewModel: FileViewModel, point: NSPoint, in sourceView: NSView) {
+        guard let byteOffset = byteOffsetForPoint(viewModel: viewModel, point: point, in: sourceView) else { return }
+        viewModel.beginSelection(at: byteOffset)
+    }
+
+    private func handleMouseDrag(viewModel: FileViewModel, point: NSPoint, in sourceView: NSView) {
+        guard let byteOffset = byteOffsetForPoint(viewModel: viewModel, point: point, in: sourceView) else { return }
+        viewModel.updateSelection(to: byteOffset)
+    }
+
+    private func handleMouseUp(viewModel: FileViewModel, point: NSPoint, in sourceView: NSView) {
+        guard let byteOffset = byteOffsetForPoint(viewModel: viewModel, point: point, in: sourceView) else { return }
+        viewModel.updateSelection(to: byteOffset)
+        viewModel.finalizeSelection()
+    }
+
+    private func byteOffsetForPoint(viewModel: FileViewModel, point: NSPoint, in sourceView: NSView) -> Int? {
         guard let renderer = viewModel.rendererPtr,
-              let metalView = viewModel.metalView else { return }
+              let metalView = viewModel.metalView else { return nil }
 
-        // Convert click point from the source NSView to the MTKView's coordinate system
         let metalPoint = sourceView.convert(point, to: metalView)
-
-        // Scale from NSView points to drawable pixels and flip Y (NSView is bottom-left, Metal layout is top-left)
         let scale = metalView.window?.backingScaleFactor ?? 2.0
         let clickX = Float(metalPoint.x * scale)
         let clickY = Float((metalView.bounds.height - metalPoint.y) * scale)
@@ -494,7 +691,7 @@ struct FileView: View {
             )
         }
 
-        viewModel.sendCursorByteOffset(Int(byteOffset))
+        return Int(byteOffset)
     }
 }
 

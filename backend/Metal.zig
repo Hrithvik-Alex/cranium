@@ -77,6 +77,10 @@ const MTLPixelFormatBGRA8Unorm: c_ulong = 80;
 const MTLPixelFormatR8Unorm: c_ulong = 10;
 const MTLPrimitiveTypeTriangle: c_ulong = 3;
 const MTLSamplerMinMagFilterLinear: c_ulong = 1;
+const MTLBlendOperationAdd: c_ulong = 0;
+const MTLBlendOperationSubtract: c_ulong = 1;
+const MTLBlendFactorZero: c_ulong = 0;
+const MTLBlendFactorOne: c_ulong = 1;
 
 // Blend factors
 const MTLBlendFactorSourceAlpha: c_ulong = 4;
@@ -120,6 +124,7 @@ const MTLRegion = extern struct {
 
 const glyph_shader_source: [*:0]const u8 = @embedFile("shaders/glyph.metal");
 const cursor_shader_source: [*:0]const u8 = @embedFile("shaders/cursor.metal");
+const selection_shader_source: [*:0]const u8 = @embedFile("shaders/selection_invert.metal");
 
 // ============================================================================
 // Pipeline Structs
@@ -138,6 +143,12 @@ const CursorPipeline = struct {
     vertex_buffer: Id,
 };
 
+const SelectionPipeline = struct {
+    pipeline_state: Id,
+    vertex_buffer: Id,
+    rect_capacity: usize,
+};
+
 // ============================================================================
 // Struct Fields
 // ============================================================================
@@ -148,6 +159,7 @@ command_queue: Id,
 view: Id,
 glyph: GlyphPipeline,
 cursor: CursorPipeline,
+selection: SelectionPipeline,
 
 fn ensureVertexCapacity(self: *Self, required_chars: usize) bool {
     if (required_chars <= self.glyph.char_capacity) return true;
@@ -169,15 +181,36 @@ fn ensureVertexCapacity(self: *Self, required_chars: usize) bool {
     return true;
 }
 
+fn ensureSelectionCapacity(self: *Self, required_rects: usize) bool {
+    if (required_rects <= self.selection.rect_capacity) return true;
+
+    var new_capacity = self.selection.rect_capacity;
+    while (new_capacity < required_rects) {
+        new_capacity *= 2;
+    }
+
+    const new_size = new_capacity * Renderer.CURSOR_VERTICES * @sizeOf(CursorVertex);
+    const new_buffer = msgSend(OptId, self.device, sel_("newBufferWithLength:options:"), .{
+        @as(c_ulong, new_size),
+        @as(c_ulong, 0),
+    }) orelse return false;
+
+    release(self.selection.vertex_buffer);
+    self.selection.vertex_buffer = new_buffer;
+    self.selection.rect_capacity = new_capacity;
+    return true;
+}
+
 // ============================================================================
 // Shader Pipeline Compilation
 // ============================================================================
 
-fn compileShaderPipeline(
+fn compileShaderPipelineInternal(
     device: Id,
     source: [*:0]const u8,
     vert_name: [*:0]const u8,
     frag_name: [*:0]const u8,
+    invert: bool,
 ) !Id {
     const source_str = createNSString(source) orelse return error.NSStringFailed;
     defer release(source_str);
@@ -200,10 +233,28 @@ fn compileShaderPipeline(
     const frag_fn = msgSend(OptId, library, sel_("newFunctionWithName:"), .{frag_ns}) orelse return error.FunctionNotFound;
     defer release(frag_fn);
 
-    return createPipelineWithBlending(device, vert_fn, frag_fn);
+    return createPipeline(device, vert_fn, frag_fn, invert);
 }
 
-fn createPipelineWithBlending(device: Id, vert_fn: Id, frag_fn: Id) !Id {
+fn compileShaderPipeline(
+    device: Id,
+    source: [*:0]const u8,
+    vert_name: [*:0]const u8,
+    frag_name: [*:0]const u8,
+) !Id {
+    return compileShaderPipelineInternal(device, source, vert_name, frag_name, false);
+}
+
+fn compileInvertShaderPipeline(
+    device: Id,
+    source: [*:0]const u8,
+    vert_name: [*:0]const u8,
+    frag_name: [*:0]const u8,
+) !Id {
+    return compileShaderPipelineInternal(device, source, vert_name, frag_name, true);
+}
+
+fn createPipeline(device: Id, vert_fn: Id, frag_fn: Id, invert: bool) !Id {
     const RPDClass = objc_getClass("MTLRenderPipelineDescriptor") orelse return error.ClassNotFound;
     const rpd_alloc = msgSend(OptId, RPDClass, sel_("alloc"), .{}) orelse return error.AllocFailed;
     const rpd = msgSend(OptId, rpd_alloc, sel_("init"), .{}) orelse return error.InitFailed;
@@ -216,10 +267,20 @@ fn createPipelineWithBlending(device: Id, vert_fn: Id, frag_fn: Id) !Id {
     const attachment0 = msgSend(OptId, attachments, sel_("objectAtIndexedSubscript:"), .{@as(c_ulong, 0)}) orelse return error.NoAttachment;
     msgSend(void, attachment0, sel_("setPixelFormat:"), .{MTLPixelFormatBGRA8Unorm});
     msgSend(void, attachment0, sel_("setBlendingEnabled:"), .{@as(i8, 1)});
-    msgSend(void, attachment0, sel_("setSourceRGBBlendFactor:"), .{MTLBlendFactorSourceAlpha});
-    msgSend(void, attachment0, sel_("setDestinationRGBBlendFactor:"), .{MTLBlendFactorOneMinusSourceAlpha});
-    msgSend(void, attachment0, sel_("setSourceAlphaBlendFactor:"), .{MTLBlendFactorSourceAlpha});
-    msgSend(void, attachment0, sel_("setDestinationAlphaBlendFactor:"), .{MTLBlendFactorOneMinusSourceAlpha});
+
+    if (invert) {
+        msgSend(void, attachment0, sel_("setRgbBlendOperation:"), .{MTLBlendOperationSubtract});
+        msgSend(void, attachment0, sel_("setSourceRGBBlendFactor:"), .{MTLBlendFactorOne});
+        msgSend(void, attachment0, sel_("setDestinationRGBBlendFactor:"), .{MTLBlendFactorOne});
+        msgSend(void, attachment0, sel_("setAlphaBlendOperation:"), .{MTLBlendOperationAdd});
+        msgSend(void, attachment0, sel_("setSourceAlphaBlendFactor:"), .{MTLBlendFactorZero});
+        msgSend(void, attachment0, sel_("setDestinationAlphaBlendFactor:"), .{MTLBlendFactorOne});
+    } else {
+        msgSend(void, attachment0, sel_("setSourceRGBBlendFactor:"), .{MTLBlendFactorSourceAlpha});
+        msgSend(void, attachment0, sel_("setDestinationRGBBlendFactor:"), .{MTLBlendFactorOneMinusSourceAlpha});
+        msgSend(void, attachment0, sel_("setSourceAlphaBlendFactor:"), .{MTLBlendFactorSourceAlpha});
+        msgSend(void, attachment0, sel_("setDestinationAlphaBlendFactor:"), .{MTLBlendFactorOneMinusSourceAlpha});
+    }
 
     var pipeline_error: OptId = null;
     const pipeline_state = msgSend(OptId, device, sel_("newRenderPipelineStateWithDescriptor:error:"), .{
@@ -319,6 +380,12 @@ pub fn init(view: Id) !*Self {
     // 7. Compile shader pipelines
     const glyph_pipeline_state = try compileShaderPipeline(device, glyph_shader_source, "glyph_vertex_main", "glyph_fragment_main");
     const cursor_pipeline_state = try compileShaderPipeline(device, cursor_shader_source, "cursor_vertex_main", "cursor_fragment_main");
+    const selection_pipeline_state = try compileInvertShaderPipeline(
+        device,
+        selection_shader_source,
+        "selection_vertex_main",
+        "selection_fragment_main",
+    );
 
     // 8. Create persistent vertex buffer for text
     const initial_buf_size = Renderer.INITIAL_TEXT_CAPACITY * Renderer.VERTICES_PER_CHAR * @sizeOf(GlyphVertex);
@@ -334,10 +401,17 @@ pub fn init(view: Id) !*Self {
         @as(c_ulong, 0),
     }) orelse return error.BufferFailed;
 
-    // 10. Allocate layout buffer
+    // 10. Create dynamic selection background vertex buffer
+    const selection_buf_size = Renderer.INITIAL_TEXT_CAPACITY * Renderer.CURSOR_VERTICES * @sizeOf(CursorVertex);
+    const selection_vertex_buffer = msgSend(OptId, device, sel_("newBufferWithLength:options:"), .{
+        @as(c_ulong, selection_buf_size),
+        @as(c_ulong, 0),
+    }) orelse return error.BufferFailed;
+
+    // 11. Allocate layout buffer
     const layout_buf = try std.heap.page_allocator.alloc(Renderer.CharPos, Renderer.INITIAL_TEXT_CAPACITY);
 
-    // 11. Allocate and return Metal instance
+    // 12. Allocate and return Metal instance
     const self = try std.heap.page_allocator.create(Self);
     self.* = .{
         .state = .{
@@ -364,12 +438,25 @@ pub fn init(view: Id) !*Self {
             .pipeline_state = cursor_pipeline_state,
             .vertex_buffer = cursor_vertex_buffer,
         },
+        .selection = .{
+            .pipeline_state = selection_pipeline_state,
+            .vertex_buffer = selection_vertex_buffer,
+            .rect_capacity = Renderer.INITIAL_TEXT_CAPACITY,
+        },
     };
 
     return self;
 }
 
-pub fn render(self: *Self, text: []const u8, view_width: f32, view_height: f32, cursor_byte_offset: i32) void {
+pub fn render(
+    self: *Self,
+    text: []const u8,
+    view_width: f32,
+    view_height: f32,
+    cursor_byte_offset: i32,
+    selection_start_byte_offset: i32,
+    selection_end_byte_offset: i32,
+) void {
     if (view_width <= 0 or view_height <= 0) return;
 
     self.state.last_view_height = view_height;
@@ -380,17 +467,12 @@ pub fn render(self: *Self, text: []const u8, view_width: f32, view_height: f32, 
     // Ensure buffers are large enough
     const needed = if (text.len > 0) text.len else 1;
     if (!self.ensureVertexCapacity(needed)) return;
+    if (!self.ensureSelectionCapacity(needed)) return;
     if (!self.state.ensureLayoutCapacity(needed)) return;
 
     // Run shared layout and cache results
     self.state.layout_result = self.state.layoutText(text, view_width, self.state.layout_buf);
     self.state.layout_text_len = text.len;
-
-    // Build vertex data from layout positions
-    const max_vertices = self.glyph.char_capacity * Renderer.VERTICES_PER_CHAR;
-    const buf_ptr = msgSend(*anyopaque, self.glyph.vertex_buffer, sel_("contents"), .{});
-    const vertices: [*]GlyphVertex = @ptrCast(@alignCast(buf_ptr));
-    const vertex_count = self.state.buildGlyphVertices(text, vertices, max_vertices);
 
     // Resolve cursor position
     const cursor_info = self.state.resolveCursorPos(cursor_byte_offset, text);
@@ -414,9 +496,17 @@ pub fn render(self: *Self, text: []const u8, view_width: f32, view_height: f32, 
     // Uniforms for shaders
     const viewport = [2]f32{ view_width, view_height };
     const text_color = [4]f32{ Renderer.TEXT_R, Renderer.TEXT_G, Renderer.TEXT_B, 1.0 };
+    const max_vertices = self.glyph.char_capacity * Renderer.VERTICES_PER_CHAR;
+    const glyph_buf_ptr = msgSend(*anyopaque, self.glyph.vertex_buffer, sel_("contents"), .{});
+    const glyph_vertices: [*]GlyphVertex = @ptrCast(@alignCast(glyph_buf_ptr));
 
-    // Draw text glyphs (only if we have vertices)
-    if (vertex_count > 0) {
+    // Draw full text glyphs first.
+    const full_text_vertex_count = self.state.buildGlyphVertices(
+        text,
+        glyph_vertices,
+        max_vertices,
+    );
+    if (full_text_vertex_count > 0) {
         msgSend(void, encoder, sel_("setRenderPipelineState:"), .{self.glyph.pipeline_state});
         msgSend(void, encoder, sel_("setFragmentTexture:atIndex:"), .{ self.glyph.texture, @as(c_ulong, 0) });
         msgSend(void, encoder, sel_("setFragmentSamplerState:atIndex:"), .{ self.glyph.sampler, @as(c_ulong, 0) });
@@ -431,7 +521,35 @@ pub fn render(self: *Self, text: []const u8, view_width: f32, view_height: f32, 
         msgSend(void, encoder, sel_("drawPrimitives:vertexStart:vertexCount:"), .{
             MTLPrimitiveTypeTriangle,
             @as(c_ulong, 0),
-            @as(c_ulong, vertex_count),
+            @as(c_ulong, full_text_vertex_count),
+        });
+    }
+
+    // Invert the selected region as a separate pass.
+    const max_selection_vertices = self.selection.rect_capacity * Renderer.CURSOR_VERTICES;
+    const selection_buf_ptr = msgSend(*anyopaque, self.selection.vertex_buffer, sel_("contents"), .{});
+    const selection_vertices: [*]CursorVertex = @ptrCast(@alignCast(selection_buf_ptr));
+    const selection_vertex_count = self.state.buildSelectionVertices(
+        text,
+        selection_vertices,
+        max_selection_vertices,
+        selection_start_byte_offset,
+        selection_end_byte_offset,
+    );
+
+    if (selection_vertex_count > 0) {
+        msgSend(void, encoder, sel_("setRenderPipelineState:"), .{self.selection.pipeline_state});
+        msgSend(void, encoder, sel_("setVertexBuffer:offset:atIndex:"), .{
+            self.selection.vertex_buffer,
+            @as(c_ulong, 0),
+            @as(c_ulong, 0),
+        });
+        setVertexBytes(encoder, @ptrCast(&viewport), @sizeOf([2]f32), 1);
+        setVertexBytes(encoder, @ptrCast(&self.state.scroll_y), @sizeOf(f32), 2);
+        msgSend(void, encoder, sel_("drawPrimitives:vertexStart:vertexCount:"), .{
+            MTLPrimitiveTypeTriangle,
+            @as(c_ulong, 0),
+            @as(c_ulong, selection_vertex_count),
         });
     }
 
@@ -480,6 +598,8 @@ pub fn updateScroll(self: *Self, delta_y: f32) void {
 }
 
 pub fn deinit(self: *Self) void {
+    release(self.selection.pipeline_state);
+    release(self.selection.vertex_buffer);
     release(self.cursor.pipeline_state);
     release(self.cursor.vertex_buffer);
     release(self.glyph.pipeline_state);

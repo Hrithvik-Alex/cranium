@@ -20,6 +20,11 @@ pub const CursorVertex = extern struct {
     position: [2]f32,
 };
 
+const SelectionRange = struct {
+    start: usize,
+    end: usize,
+};
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -58,6 +63,22 @@ pub fn quadPositions(l: f32, t: f32, r: f32, b: f32) QuadPositions {
         .{ l, t }, .{ l, b }, .{ r, b }, // triangle 1
         .{ l, t }, .{ r, b }, .{ r, t }, // triangle 2
     };
+}
+
+fn normalizedSelectionRange(selection_start_byte_offset: i32, selection_end_byte_offset: i32, text_len: usize) ?SelectionRange {
+    if (selection_start_byte_offset < 0 or selection_end_byte_offset < 0) return null;
+
+    var a: usize = @intCast(selection_start_byte_offset);
+    var b: usize = @intCast(selection_end_byte_offset);
+    if (a > text_len) a = text_len;
+    if (b > text_len) b = text_len;
+
+    if (a == b) return null;
+
+    return if (a < b)
+        .{ .start = a, .end = b }
+    else
+        .{ .start = b, .end = a };
 }
 
 // ============================================================================
@@ -254,6 +275,48 @@ pub fn buildGlyphVertices(
     return vertex_count;
 }
 
+pub fn buildSelectionVertices(
+    self: *const Self,
+    text: []const u8,
+    selection_verts: [*]CursorVertex,
+    max_vertices: usize,
+    selection_start_byte_offset: i32,
+    selection_end_byte_offset: i32,
+) usize {
+    const selection = normalizedSelectionRange(selection_start_byte_offset, selection_end_byte_offset, text.len) orelse return 0;
+    var vertex_count: usize = 0;
+
+    for (self.layout_buf[0..self.layout_result.count]) |cp| {
+        if (cp.byte_index >= text.len) break;
+        if (cp.byte_index < selection.start or cp.byte_index >= selection.end) continue;
+
+        const ch = text[cp.byte_index];
+        if (ch == '\n') continue;
+        if (vertex_count + 6 > max_vertices) break;
+
+        var width = cp.advance;
+        if (width <= 0) {
+            if (self.atlas.getGlyphInfo(@intCast(ch))) |glyph| {
+                width = glyph.advance;
+            }
+        }
+        if (width <= 0) continue;
+
+        const left = cp.x;
+        const right = cp.x + width;
+        const top = cp.baseline_y - self.atlas.ascent;
+        const bottom = top + self.atlas.line_height;
+
+        const pos = quadPositions(left, top, right, bottom);
+        for (0..6) |vi| {
+            selection_verts[vertex_count + vi] = .{ .position = pos[vi] };
+        }
+        vertex_count += 6;
+    }
+
+    return vertex_count;
+}
+
 // ============================================================================
 // Cursor Resolution
 // ============================================================================
@@ -377,11 +440,38 @@ pub fn hitTest(self: *Self, text: []const u8, view_width: f32, click_x: f32, cli
         }
     }
 
-    // If no line matched (click below all text), place cursor at end
+    // If no line matched, handle clicks above/below all laid out text lines.
     if (best_dist == std.math.floatMax(f32)) {
+        const first = self.layout_buf[0];
+        const first_line_top = first.baseline_y - ascent;
+
+        // Click above first line: place cursor on first visual line.
+        if (abs_click_y < first_line_top) {
+            var first_line_end: usize = 1;
+            const first_baseline = first.baseline_y;
+            while (first_line_end < layout.count and self.layout_buf[first_line_end].baseline_y == first_baseline) {
+                first_line_end += 1;
+            }
+
+            best_dist = std.math.floatMax(f32);
+            best_byte = self.layout_buf[0].byte_index;
+            for (self.layout_buf[0..first_line_end]) |cp| {
+                const dl = @abs(click_x - cp.x);
+                const dr = @abs(click_x - (cp.x + cp.advance));
+                if (dl < best_dist) {
+                    best_dist = dl;
+                    best_byte = cp.byte_index;
+                }
+                if (dr < best_dist) {
+                    best_dist = dr;
+                    best_byte = cp.byte_index + 1;
+                }
+            }
+        }
+
         // Check if click is below the last line
         const last = self.layout_buf[layout.count - 1];
-        if (abs_click_y >= last.baseline_y - ascent) {
+        if (best_dist == std.math.floatMax(f32) and abs_click_y >= last.baseline_y - ascent) {
             // Find last char on the last line and check x
             var last_on_line_idx: usize = layout.count - 1;
             const last_baseline = last.baseline_y;
