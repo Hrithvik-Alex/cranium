@@ -250,8 +250,24 @@ export fn handleKeyEvent(session_ptr: ?*CEditSession, key_code: u16, modifiers: 
     const session: *EditSession = @ptrCast(@alignCast(c_session.session_ptr orelse return));
 
     const cmd_mask: u64 = 1 << 20;
+    const shift_mask: u64 = 1 << 17;
     if ((modifiers & cmd_mask) != 0 and key_code == 1) {
         session.saveFile() catch {};
+        return;
+    }
+    if ((modifiers & cmd_mask) != 0 and (modifiers & shift_mask) != 0 and key_code == 6) {
+        _ = session.redo() catch return;
+        c_session.sync();
+        return;
+    }
+    if ((modifiers & cmd_mask) != 0 and key_code == 6) {
+        _ = session.undo() catch return;
+        c_session.sync();
+        return;
+    }
+    if ((modifiers & cmd_mask) != 0 and key_code == 16) {
+        _ = session.redo() catch return;
+        c_session.sync();
         return;
     }
 

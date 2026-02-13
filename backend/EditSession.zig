@@ -38,6 +38,21 @@ pub const CursorMetrics = struct {
     line_height: f32,
 };
 
+pub const EditAction = union(enum) {
+    insert: struct {
+        offset: usize,
+        text: []const u8,
+        cursor_before: usize,
+        cursor_after: usize,
+    },
+    delete: struct {
+        offset: usize,
+        text: []const u8,
+        cursor_before: usize,
+        cursor_after: usize,
+    },
+};
+
 // ============================================================================
 // Struct Fields
 // ============================================================================
@@ -51,6 +66,8 @@ font: EditorFont,
 font_cache: FontCache,
 root_block: ?*Block,
 cursor: Cursor,
+history: std.ArrayListUnmanaged(EditAction),
+history_index: usize,
 
 // ============================================================================
 // Private Helpers
@@ -246,6 +263,22 @@ fn updateCursor(self: *Self, byte_pos: usize) void {
     self.updateCursorMetrics();
 }
 
+fn truncateFutureHistory(self: *Self) void {
+    if (self.history_index < self.history.items.len) {
+        self.history.shrinkRetainingCapacity(self.history_index);
+    }
+}
+
+fn recordAction(self: *Self, action: EditAction) !void {
+    self.truncateFutureHistory();
+    try self.history.append(self.session_arena.allocator(), action);
+    self.history_index = self.history.items.len;
+}
+
+fn cloneTextRange(self: *Self, start: usize, end: usize) ![]const u8 {
+    return try self.session_arena.allocator().dupe(u8, self.editor.buffer[start..end]);
+}
+
 // ============================================================================
 // Public Methods
 // ============================================================================
@@ -316,6 +349,8 @@ pub fn create(filename: []const u8) !*Self {
                 .line_height = 0,
             },
         },
+        .history = .{},
+        .history_index = 0,
     };
 
     try session.reparse();
@@ -341,26 +376,59 @@ pub fn close(self: *Self) void {
 
 pub fn insertText(self: *Self, text: []const u8) !void {
     if (text.len == 0) return;
-    try self.editor.insert(self.session_arena.allocator(), self.cursor.byte_offset, text);
+    const insert_offset = self.cursor.byte_offset;
+    const cursor_before = self.cursor.byte_offset;
+    const inserted_text = try self.session_arena.allocator().dupe(u8, text);
+    try self.editor.insert(self.session_arena.allocator(), insert_offset, text);
     self.cursor.byte_offset += text.len;
+    try self.recordAction(.{
+        .insert = .{
+            .offset = insert_offset,
+            .text = inserted_text,
+            .cursor_before = cursor_before,
+            .cursor_after = self.cursor.byte_offset,
+        },
+    });
     try self.reparse();
 }
 
 pub fn deleteBackward(self: *Self) !void {
-    const prev = @max(0, self.cursor.byte_offset - 1);
-    if (prev < self.cursor.byte_offset) {
-        try self.editor.delete_range(prev, self.cursor.byte_offset);
-        self.cursor.byte_offset = prev;
-        try self.reparse();
-    }
+    if (self.cursor.byte_offset == 0) return;
+
+    const end = self.cursor.byte_offset;
+    const start = end - 1;
+    const deleted_text = try self.cloneTextRange(start, end);
+
+    try self.editor.delete_range(start, end);
+    self.cursor.byte_offset = start;
+    try self.recordAction(.{
+        .delete = .{
+            .offset = start,
+            .text = deleted_text,
+            .cursor_before = end,
+            .cursor_after = start,
+        },
+    });
+    try self.reparse();
 }
 
 pub fn deleteForward(self: *Self) !void {
-    const next = @min(self.editor.size, self.cursor.byte_offset + 1);
-    if (next > self.cursor.byte_offset) {
-        try self.editor.delete_range(self.cursor.byte_offset, next);
-        try self.reparse();
-    }
+    if (self.cursor.byte_offset >= self.editor.size) return;
+
+    const start = self.cursor.byte_offset;
+    const end = start + 1;
+    const deleted_text = try self.cloneTextRange(start, end);
+
+    try self.editor.delete_range(start, end);
+    try self.recordAction(.{
+        .delete = .{
+            .offset = start,
+            .text = deleted_text,
+            .cursor_before = start,
+            .cursor_after = start,
+        },
+    });
+    try self.reparse();
 }
 
 pub fn moveCursorLeft(self: *Self) void {
@@ -406,9 +474,71 @@ pub fn deleteTextRange(self: *Self, start_offset: usize, end_offset: usize) !voi
         return;
     }
 
+    const cursor_before = self.cursor.byte_offset;
+    const deleted_text = try self.cloneTextRange(start, end);
     try self.editor.delete_range(start, end);
     self.cursor.byte_offset = start;
+    try self.recordAction(.{
+        .delete = .{
+            .offset = start,
+            .text = deleted_text,
+            .cursor_before = cursor_before,
+            .cursor_after = self.cursor.byte_offset,
+        },
+    });
     try self.reparse();
+}
+
+pub fn undo(self: *Self) !bool {
+    if (self.history_index == 0) return false;
+
+    self.history_index -= 1;
+    const action = self.history.items[self.history_index];
+
+    switch (action) {
+        .insert => |insert_action| {
+            const start = @min(insert_action.offset, self.editor.size);
+            const end = @min(start + insert_action.text.len, self.editor.size);
+            if (end > start) {
+                try self.editor.delete_range(start, end);
+            }
+            self.cursor.byte_offset = @min(insert_action.cursor_before, self.editor.size);
+        },
+        .delete => |delete_action| {
+            const insert_offset = @min(delete_action.offset, self.editor.size);
+            try self.editor.insert(self.session_arena.allocator(), insert_offset, delete_action.text);
+            self.cursor.byte_offset = @min(delete_action.cursor_before, self.editor.size);
+        },
+    }
+
+    try self.reparse();
+    return true;
+}
+
+pub fn redo(self: *Self) !bool {
+    if (self.history_index >= self.history.items.len) return false;
+
+    const action = self.history.items[self.history_index];
+    self.history_index += 1;
+
+    switch (action) {
+        .insert => |insert_action| {
+            const insert_offset = @min(insert_action.offset, self.editor.size);
+            try self.editor.insert(self.session_arena.allocator(), insert_offset, insert_action.text);
+            self.cursor.byte_offset = @min(insert_action.cursor_after, self.editor.size);
+        },
+        .delete => |delete_action| {
+            const start = @min(delete_action.offset, self.editor.size);
+            const end = @min(start + delete_action.text.len, self.editor.size);
+            if (end > start) {
+                try self.editor.delete_range(start, end);
+            }
+            self.cursor.byte_offset = @min(delete_action.cursor_after, self.editor.size);
+        },
+    }
+
+    try self.reparse();
+    return true;
 }
 
 pub fn saveFile(self: *Self) !void {
